@@ -1,0 +1,23 @@
+# Installed into .venv (layered on the base conda torch 2.14+cu130 via --system-site-packages).
+# See setup.sh for the exact install order; sam2 needs --no-build-isolation, and the
+# Intrinsic packages are installed --no-deps so they don't pull opencv-python (non-headless).
+opencv-python-headless>=4.10
+scikit-image>=0.24
+scikit-learn>=1.5
+scipy>=1.13
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+tqdm
+hydra-core>=1.3.2
+iopath>=0.1.10
+ddgs
+pytest
+kornia
+timm
+antialiased_cnns
+gdown
+imageio
+beautifulsoup4
+requests
+matplotlib
