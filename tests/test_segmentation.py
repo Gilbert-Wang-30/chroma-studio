@@ -147,6 +147,39 @@ def test_bimodal_split():
     assert left[0, 0] != right[0, 0]
 
 
+def test_split_products_are_split_again(monkeypatch):
+    """Step 2 examines each SAM region once, so the smaller half of a split kept whatever
+    else it held (the BMW's nose shared a region with every blown specular of the bike).
+    Step 5 re-runs the split on the regions step 2 produced: a blue / red / orange part
+    comes out as three regions, a complete int32 partition."""
+    from recolor.segmentation import hierarchy
+    rng = np.random.default_rng(0)
+    alb = np.empty((H, W, 3), np.float32)
+    alb[:] = GRAY
+    alb[30:130, 40:112] = BLUE
+    alb[30:130, 112:136] = RED
+    alb[30:130, 136:160] = (0.90, 0.45, 0.05)
+    alb = np.clip(alb + rng.normal(0, 0.01, alb.shape).astype(np.float32), 0, 1)
+    image = imageio.to_uint8(imageio.linear_to_srgb(alb * np.linspace(0.6, 1.0, W, dtype=np.float32)[None, :, None]))
+    seg = np.zeros((H, W), bool)
+    seg[30:130, 40:160] = True
+
+    def parts(labels):
+        return [np.unique(labels[40:120, x0:x1]).tolist() for x0, x1 in ((45, 105), (116, 132), (140, 156))]
+
+    monkeypatch.setattr(hierarchy, "RESPLIT_ROUNDS", 0)
+    labels, _ = build_regions(image, alb, [_mask(seg)], detail="balanced")
+    blue, red, orange = parts(labels)
+    assert red == orange and blue != red                     # without step 5: red + orange share a region
+    monkeypatch.setattr(hierarchy, "RESPLIT_ROUNDS", 3)
+    labels, info = build_regions(image, alb, [_mask(seg)], detail="balanced")
+    blue, red, orange = parts(labels)
+    assert len({blue[0], red[0], orange[0]}) == 3 and len(blue) == len(red) == len(orange) == 1
+    assert labels.dtype == np.int32 and labels.min() == 0 and labels.max() == len(info) - 1
+    assert [d["id"] for d in info] == list(range(len(info)))
+    assert sum(d["source"] == "split" for d in info) == 2
+
+
 def test_gradient_is_not_split():
     image, alb = _scene()
     alb = alb.copy()
@@ -317,3 +350,157 @@ def test_split_two_tone_region_at_pixel_level():
     assert "green" in hues and (("yellow" in hues) or ("orange" in hues))
     new_region = next(r for r in r2 if r.id == n_regions)
     assert new_region.source == "split" and 16 <= new_region.area <= 20 * 35
+    # a piece cut off lettering stays lettering (the pruning's exemption, the island treatment)
+    info = [{"id": 0, "source": "sam"}, {"id": 1, "source": "sam"}, {"id": 2, "source": "text"}]
+    regions, groups, group_map = group_regions(labels, alb, info, delta_e=10.0)
+    gid = next(r.group_id for r in regions if r.id == 2)
+    lab3 = labels.copy()
+    r3, _, _ = split_group(groups, regions, group_map, lab3, alb, gid, k=2)
+    assert next(r for r in r3 if r.id == n_regions).source == "text"
+
+
+# ---------------------------------------------------------------------- part recovery
+
+def _pocket_scene():
+    """A dark grey machine (region 0, 120 x 160) holding a small gold part SAM never
+    proposed (20 x 20 at 50..70 x 60..80), on a light backdrop (region 1)."""
+    h, w = 140, 200
+    labels = np.ones((h, w), np.int32)
+    labels[10:130, 20:180] = 0
+    lab = np.zeros((h, w, 3), np.float32)
+    lab[...] = (85.0, 0.0, 0.0)
+    lab[labels == 0] = (20.0, 0.5, 1.0)
+    lab[50:70, 60:80] = (35.0, 6.0, 32.0)                           # the gold part
+    albedo = np.clip(imageio.lab_to_linear(lab), 0.0, 1.0).astype(np.float32)
+    image = imageio.to_uint8(imageio.linear_to_srgb(albedo))
+    info = [{"id": 0, "source": "sam", "confidence": 0.9}, {"id": 1, "source": "sam", "confidence": 0.9}]
+    return image, albedo, labels, info
+
+
+def _cand(full: np.ndarray, score: float = 0.9, clipped: bool = False, x0: int = 0, y0: int = 0, size: int = 96) -> dict:
+    return {"mask": full[y0:y0 + size, x0:x0 + size].copy(), "x0": x0, "y0": y0, "score": score, "clipped": clipped}
+
+
+def test_find_pockets_finds_a_coloured_part_inside_a_neutral_region():
+    from recolor.segmentation.hierarchy import find_pockets
+    image, albedo, labels, info = _pocket_scene()
+    pockets = find_pockets(labels, imageio.linear_to_lab(albedo))
+    assert len(pockets) == 1
+    p = pockets[0]
+    assert p["region"] == 0 and 300 <= p["px"] <= 400
+    x, y = p["point"]
+    assert 55 <= x <= 75 and 45 <= y <= 65                          # a point well inside the part
+    # a coloured host region is not searched (its pockets are its own colours)
+    lab2 = imageio.linear_to_lab(albedo).copy()
+    lab2[labels == 0] = (40.0, 50.0, 30.0)
+    assert find_pockets(labels, lab2) == []
+
+
+def test_recover_parts_stamps_the_part_sam_returns_and_rejects_the_rest():
+    from recolor.segmentation.hierarchy import recover_parts
+    image, albedo, labels, info = _pocket_scene()
+    part = np.zeros(labels.shape, bool)
+    part[50:70, 60:80] = True
+    machine = labels == 0
+    calls = []
+
+    def prompter(img, points):
+        calls.append(list(points))
+        # per point: the part itself, a clipped mask of the whole machine, a low-score blob
+        return [[_cand(part, 0.95, x0=30, y0=20), _cand(machine, 0.99, clipped=True, x0=30, y0=20),
+                 _cand(part, 0.3, x0=30, y0=20)] for _ in points]
+
+    before = labels.copy()
+    out, out_info, n = recover_parts(image, albedo, labels, info, prompter)
+    assert len(calls) == 1 and n == 1
+    assert out.dtype == np.int32 and out.min() == 0 and int(out.max()) + 1 == len(out_info) == 3
+    new_id = int(out[60, 70])
+    assert new_id not in (int(out[20, 30]), int(out[0, 0]))
+    assert (out == new_id).sum() == 400 and out_info[new_id]["source"] == "prompt"
+    assert out_info[new_id]["area"] == 400 and out_info[int(out[20, 30])]["area"] == int(machine.sum()) - 400
+    assert np.array_equal(labels, before)                           # the input is not modified
+
+
+def test_recover_parts_keeps_the_partition_when_nothing_is_a_part():
+    from recolor.segmentation.hierarchy import recover_parts
+    image, albedo, labels, info = _pocket_scene()
+    grey = np.zeros(labels.shape, bool)
+    grey[40:80, 50:90] = True                                        # neutral median: a chrome part, not the gold
+
+    def prompter(img, points):
+        return [[_cand(grey, 0.95, x0=30, y0=20)] for _ in points]
+
+    out, out_info, n = recover_parts(image, albedo, labels, info, prompter)
+    assert n == 0 and np.array_equal(out, labels) and len(out_info) == 2
+    # no pocket at all: the prompter is never asked
+    flat = np.full_like(albedo, 0.2)
+    out, _, n = recover_parts(image, flat, labels, info, lambda img, pts: pytest.fail("prompted"))
+    assert n == 0 and np.array_equal(out, labels)
+
+
+def _colour_pocket_scene():
+    """A yellow paint region (0) made of a large panel plus two pieces far from it that SAM's
+    colour mode swept in: a gold part (darker, duller: another material) and a sliver of the
+    same yellow seen through a gap; a grey machine (1) around the pieces; a backdrop (2)."""
+    h, w = 140, 220
+    labels = np.full((h, w), 2, np.int32)
+    labels[10:130, 110:210] = 1                                      # the machine
+    labels[10:130, 10:100] = 0                                       # the panel
+    labels[40:60, 130:152] = 0                                       # the gold part (440 px)
+    labels[90:100, 170:180] = 0                                      # a sliver of the paint (100 px)
+    lab = np.zeros((h, w, 3), np.float32)
+    lab[...] = (88.0, 0.0, 0.0)
+    lab[labels == 1] = (22.0, 0.5, 1.5)
+    lab[labels == 0] = (78.0, 4.0, 79.0)
+    lab[40:60, 130:152] = (60.0, 9.5, 37.0)
+    albedo = np.clip(imageio.lab_to_linear(lab), 0.0, 1.0).astype(np.float32)
+    image = imageio.to_uint8(imageio.linear_to_srgb(albedo))
+    info = [{"id": i, "source": "split" if i == 0 else "sam", "confidence": 0.9} for i in range(3)]
+    return image, albedo, labels, info
+
+
+def test_find_colour_pockets_finds_an_off_colour_piece_of_a_chromatic_region():
+    from recolor.segmentation.hierarchy import find_colour_pockets, find_pockets
+    image, albedo, labels, info = _colour_pocket_scene()
+    lab = imageio.linear_to_lab(albedo)
+    pockets = find_colour_pockets(labels, lab)
+    assert len(pockets) == 1                                         # not the panel, not the paint sliver
+    p = pockets[0]
+    assert p["region"] == 0 and p["kind"] == "colour" and p["px"] == 440
+    x, y = p["point"]
+    assert 130 <= x < 152 and 40 <= y < 60
+    assert find_pockets(labels, lab) == []                           # the neutral-host search does not see it
+
+
+def test_recover_parts_gives_an_off_colour_piece_its_own_region():
+    from recolor.segmentation.hierarchy import recover_parts
+    image, albedo, labels, info = _colour_pocket_scene()
+    gold = np.zeros(labels.shape, bool)
+    gold[38:62, 128:154] = True                                      # SAM's part: the piece and its rim
+    grey = np.zeros(labels.shape, bool)
+    grey[30:70, 120:160] = True                                      # mostly machine: a neutral median
+
+    def prompter(img, points):
+        return [[_cand(grey, 0.97, x0=100, y0=0, size=100), _cand(gold, 0.9, x0=100, y0=0, size=100)]
+                for _ in points]
+
+    out, out_info, n = recover_parts(image, albedo, labels, info, prompter)
+    assert n == 1 and int(out.max()) + 1 == len(out_info) == 4
+    new_id = int(out[50, 140])
+    assert out_info[new_id]["source"] == "part" and (out == new_id).sum() == int(gold.sum())
+    assert int(out[50, 50]) != new_id and int(out[95, 175]) == int(out[50, 50])   # panel and sliver stay paint
+
+    # a mask that covers the piece but is mostly the host's own colour is not a part of its own
+    from recolor.segmentation import hierarchy
+    lab = imageio.linear_to_lab(albedo)
+    pocket = hierarchy.find_colour_pockets(labels, lab)[0]
+    host = np.median(lab[labels == 0], axis=0)
+    around = np.zeros(labels.shape, bool)
+    around[30:70, 120:160] = True
+    lab_y = lab.copy()
+    lab_y[around & (labels == 1)] = (78.0, 4.0, 79.0)                # the paint's yellow all around it
+    assert hierarchy._accept_part(_cand(around, 0.96, x0=100, y0=0, size=100), pocket, labels, lab_y, host) is None
+    assert hierarchy._accept_part(_cand(gold, 0.9, x0=100, y0=0, size=100), pocket, labels, lab, host) is not None
+    small = np.zeros(labels.shape, bool)
+    small[45:50, 135:141] = True                                     # 30 px of the 440 px piece: not the part
+    assert hierarchy._accept_part(_cand(small, 0.9, x0=100, y0=0, size=100), pocket, labels, lab, host) is None

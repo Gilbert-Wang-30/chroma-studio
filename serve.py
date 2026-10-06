@@ -4,11 +4,11 @@
     .venv/bin/python serve.py [--port N] [--warmup]
 
 Binds 0.0.0.0:config.SERVER_PORT (env RECOLOR_PORT, default 8810) and prints the
-loopback, LAN and Tailscale URLs. SAM 2 and the intrinsic model load lazily on first
-use (the first analysis, or a full-resolution export) and are dropped again after
-config.IDLE_UNLOAD_S seconds (env RECOLOR_IDLE_UNLOAD_S, default 120) with none
+loopback, LAN and Tailscale URLs. SAM 2, the intrinsic model and ViTMatte load lazily
+on first use (the first analysis, or a full-resolution export) and are dropped again
+after config.IDLE_UNLOAD_S seconds (env RECOLOR_IDLE_UNLOAD_S, default 120) with none
 running, so the GPU only holds them while the app is actually being used. Pass
---warmup to preload both at startup instead of waiting for the first job; they are
+--warmup to preload them at startup instead of waiting for the first job; they are
 still unloaded on the same idle timer afterwards. Reminds you about ufw when the LAN
 port is closed.
 """
@@ -19,6 +19,12 @@ import os
 import socket
 import subprocess
 import sys
+
+# PyTorch's caching allocator with expandable segments: a full-resolution export of a
+# 10 MP original reserves 25.7 GB at its peak instead of 28.9 GB (measured, same speed), so
+# it goes through fewer free-and-retry rounds on the shared card. Set before torch is
+# imported (the allocator reads it once); an explicit environment wins.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
@@ -91,7 +97,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Recolor server")
     ap.add_argument("--port", type=int, default=config.SERVER_PORT)
     ap.add_argument("--warmup", action="store_true",
-                    help="preload SAM 2 / Intrinsic at startup instead of on the first job "
+                    help="preload SAM 2 / Intrinsic / ViTMatte at startup instead of on the first job "
                          "(they are still unloaded after the idle timeout)")
     ap.add_argument("--no-warmup", action="store_true", help=argparse.SUPPRESS)  # deprecated: already the default
     ap.add_argument("--log-level", default="info")
@@ -126,7 +132,7 @@ def main() -> None:
     idle_s = config.IDLE_UNLOAD_S
     idle_note = f"idle {idle_s:g}s" if idle_s > 0 else "idle-unload disabled"
     if args.warmup:
-        print(f"  Warming SAM 2 and Intrinsic on the GPU now; unloaded again after {idle_note} unused.")
+        print(f"  Warming SAM 2, Intrinsic and ViTMatte on the GPU now; unloaded again after {idle_note} unused.")
     else:
         print(f"  Models load on the first job and unload again after {idle_note} unused.")
     if firewall_is_up():

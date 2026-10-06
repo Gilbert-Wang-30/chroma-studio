@@ -71,6 +71,7 @@ export function createStepper(store) {
       row.msg.textContent = st.state === 'running' && st.message ? st.message
         : st.state === 'error' ? (st.message || 'Failed')
         : st.state === 'done' ? (st.message || step.hint) : step.hint;
+      row.msg.title = row.msg.textContent;   // a running message is one line; the full text on hover
       row.time.textContent = st.state === 'done' && st.seconds ? formatSeconds(st.seconds) : '';
     }
     const text = statusLine.querySelector('.stepper-status-text');

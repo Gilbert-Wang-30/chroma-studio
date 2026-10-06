@@ -383,5 +383,27 @@
    3456
   ],
   "label": "Gunpla kit, packed"
+ },
+ "car_alpine_1.jpg": {
+  "title": "File:Alpine A110 Premiere Edition.jpg",
+  "source": "https://upload.wikimedia.org/wikipedia/commons/thumb/e/e2/Alpine_A110_Premiere_Edition.jpg/3840px-Alpine_A110_Premiere_Edition.jpg",
+  "license": "CC BY-SA 4.0",
+  "artist": "Rolf Kranz",
+  "size": [
+   3840,
+   2563
+  ],
+  "label": "White Alpine A110, blue calipers"
+ },
+ "car_corvette_1.jpg": {
+  "title": "File:2022 Chevrolet Corvette, Tallahassee Automobile Museum.jpg",
+  "source": "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5f/2022_Chevrolet_Corvette%2C_Tallahassee_Automobile_Museum.jpg/3840px-2022_Chevrolet_Corvette%2C_Tallahassee_Automobile_Museum.jpg",
+  "license": "CC BY-SA 4.0",
+  "artist": "Michael Rivera",
+  "size": [
+   3840,
+   2560
+  ],
+  "label": "Grey Corvette, yellow calipers and stripe"
  }
 }

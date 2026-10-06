@@ -25,7 +25,11 @@ export function homeView(root, { navigate }) {
   const fileInput = h('input', { type: 'file', accept: 'image/*', hidden: true, aria: { label: 'Choose an image' } });
   fileInput.addEventListener('change', () => { if (fileInput.files?.[0]) pick(fileInput.files[0]); fileInput.value = ''; });
 
-  const detailSeg = segmented(DETAILS, detail, (v) => { detail = v; prefs.set('detail', v); }, { ariaLabel: 'Analysis detail' });
+  // The same detail level drives the drop zone's Analyze and the sample strip; the two
+  // controls stay in step (the strip's is on screen before a file is picked).
+  const setDetail = (v) => { detail = v; prefs.set('detail', v); detailSeg.setValue(v); sampleDetailSeg.setValue(v); };
+  const detailSeg = segmented(DETAILS, detail, setDetail, { ariaLabel: 'Analysis detail' });
+  const sampleDetailSeg = segmented(DETAILS, detail, setDetail, { ariaLabel: 'Analysis detail for the samples', size: 'sm' });
   const analyzeBtn = h('button.btn.btn-primary.btn-lg', { type: 'button', onClick: () => analyzePicked() }, icon('spark', { size: 18 }), h('span', 'Analyze'));
   const cancelBtn = h('button.btn.btn-ghost', { type: 'button', onClick: () => clearPick() }, 'Choose another');
   const previewImg = h('img.drop-preview-img', { alt: '' });
@@ -119,7 +123,7 @@ export function homeView(root, { navigate }) {
   const view = h('div.home',
     hero,
     zone,
-    h('section.home-section', h('div.section-head', h('h2', 'Try a sample'), h('span.section-hint', 'Analyzed with the detail level above')), samplesStrip),
+    h('section.home-section', h('div.section-head', h('h2', 'Try a sample'), h('div.section-tools', h('span.section-hint', 'Detail'), sampleDetailSeg)), samplesStrip),
     recentSection);
   replace(root, view);
   enterChildren(view, { step: 70 });

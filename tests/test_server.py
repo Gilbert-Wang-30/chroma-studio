@@ -7,9 +7,11 @@ runs end to end on a small synthetic image. No models, no network, no GPU needed
 """
 from __future__ import annotations
 
+import io
 import json
 import os
 import sys
+import time
 import types
 from dataclasses import dataclass
 
@@ -82,7 +84,7 @@ def _fake_sam_module() -> types.ModuleType:
 def _fake_hierarchy_module() -> types.ModuleType:
     m = types.ModuleType("recolor.segmentation.hierarchy")
 
-    def build_regions(image_rgb_u8, albedo_lin, masks, detail="balanced", progress=None):
+    def build_regions(image_rgb_u8, albedo_lin, masks, detail="balanced", progress=None, extra=None):
         h, w = image_rgb_u8.shape[:2]
         labels = np.zeros((h, w), np.int32)
         labels[:, w // 2:] = 1
@@ -129,7 +131,7 @@ def _make_groups(regions: list[Region], labels: np.ndarray, assignment: dict[int
 def _fake_grouping_module() -> types.ModuleType:
     m = types.ModuleType("recolor.segmentation.grouping")
 
-    def group_regions(labels, albedo_lin, region_info, max_groups=None, delta_e=10.0):
+    def group_regions(labels, albedo_lin, region_info, max_groups=None, delta_e=10.0, photo_rgb_u8=None):
         n = int(labels.max()) + 1
         regions = [_region(i, labels, albedo_lin, i) for i in range(n)]
         assignment = {i: i for i in range(n)}
@@ -138,7 +140,7 @@ def _fake_grouping_module() -> types.ModuleType:
         groups, gm = _make_groups(regions, labels, assignment)
         return regions, groups, gm
 
-    def regroup(regions, labels, albedo_lin, max_groups, delta_e):
+    def regroup(regions, labels, albedo_lin, max_groups, delta_e, photo_rgb_u8=None):
         assignment = {r.id: (r.id if max_groups is None else min(r.id, max_groups - 1)) for r in regions}
         groups, gm = _make_groups(regions, labels, assignment)
         return regions, groups, gm
@@ -176,8 +178,49 @@ def _fake_grouping_module() -> types.ModuleType:
     return m
 
 
+def _fake_refine_module() -> types.ModuleType:
+    """Group refinement stand-in: the grouping passes through; the islands are region 2's
+    pixels and the protect mask is the pixels of the last group, a deterministic function of
+    the grouping, so the tests can tell a recomputed mask from a stale one."""
+    m = types.ModuleType("recolor.segmentation.refine")
+    m.calls = []
+
+    def _protect(group_map):
+        return group_map == int(group_map.max())
+
+    def refine_groups(photo, albedo, labels, regions, groups, group_map, snap, progress=None, residual=None, **kw):
+        snapped, method = snap(photo, labels, group_map, groups, protect=labels == 2, progress=progress)
+        m.calls.append(("refine_groups", method))
+        m.kwargs = dict(kw)
+        return types.SimpleNamespace(labels=snapped, regions=regions, groups=groups, group_map=group_map,
+                                     islands=labels == 2, protect=_protect(group_map),
+                                     report={"snap": method, "decal_px": int((labels == 2).sum()), "locked": []})
+
+    def refine_after_edit(photo, albedo, labels, regions, groups, group_map, islands, regrouped):
+        m.calls.append(("after_edit", bool(regrouped), None if islands is None else int(islands.sum())))
+        return regions, groups, group_map, _protect(group_map)
+
+    m.refine_groups, m.refine_after_edit = refine_groups, refine_after_edit
+    return m
+
+
+def _fake_matting_module() -> types.ModuleType:
+    m = types.ModuleType("recolor.segmentation.matting")
+
+    def snap_labels(image, labels, group_map, groups, protect=None, progress=None):
+        return labels.copy(), "vitmatte"
+
+    m.snap_labels = snap_labels
+    m.status = lambda: "cold"
+    m.is_loaded = lambda: False
+    m.release = lambda: None
+    m.warmup = lambda: None
+    return m
+
+
 def _fake_engine_module() -> types.ModuleType:
     m = types.ModuleType("recolor.engine")
+    m.full_calls = []
 
     def _paint(albedo, shading, residual, group_map, groups, mapping, options):
         lin = albedo * shading + residual
@@ -187,11 +230,17 @@ def _fake_engine_module() -> types.ModuleType:
                 out[group_map == gid] = imageio.hex_to_rgb01(hexv)
         return imageio.to_uint8(out)
 
+    def render_once(albedo, shading, residual, group_map, groups, mapping, options, **masks):
+        m.full_calls.append(masks)
+        return _paint(albedo, shading, residual, group_map, groups, mapping, options)
+
     class Renderer:
         calls = 0
+        last_masks: dict = {}
 
-        def __init__(self, albedo_lin, shading_lin, residual, group_map, groups):
+        def __init__(self, albedo_lin, shading_lin, residual, group_map, groups, **masks):
             self.layers = (albedo_lin, shading_lin, residual, group_map, groups)
+            Renderer.last_masks = masks
 
         def render(self, mapping, options):
             Renderer.calls += 1
@@ -200,8 +249,20 @@ def _fake_engine_module() -> types.ModuleType:
         def render_at(self, long_side, mapping, options):
             return imageio.resize_long_side(self.render(mapping, options), long_side)
 
+        def white_glints(self):
+            return np.zeros(self.layers[3].shape, np.float32)
+
+        def neutral_weights(self):
+            return np.zeros((int(self.layers[3].max()) + 1, 2), np.float32)
+
+        def neutral_sources(self, mapping, options=None):
+            return tuple(int(k) for k, v in (mapping or {}).items() if v)
+
+        def free(self):
+            pass
+
     m.Renderer = Renderer
-    m.render_once = _paint
+    m.render_once = render_once
     return m
 
 
@@ -279,6 +340,8 @@ def env(tmp_path, monkeypatch):
         "recolor.segmentation.sam_masks": _fake_sam_module(),
         "recolor.segmentation.hierarchy": _fake_hierarchy_module(),
         "recolor.segmentation.grouping": _fake_grouping_module(),
+        "recolor.segmentation.refine": _fake_refine_module(),
+        "recolor.segmentation.matting": _fake_matting_module(),
         "recolor.engine": _fake_engine_module(),
         "recolor.palette": _fake_palette_module(str(data / "cache" / "palettes")),
         "recolor.mapping": _fake_mapping_module(),
@@ -319,7 +382,7 @@ def _events(client, jid):
 
 def test_health_and_samples(client):
     h = client.get("/api/health").json()
-    assert h["ok"] is True and set(h["models"]) == {"sam2", "intrinsic"}
+    assert h["ok"] is True and set(h["models"]) == {"sam2", "intrinsic", "vitmatte", "florence", "birefnet", "owlv2"}
     assert h["models"]["sam2"] in ("cold", "loading", "ready") and "vram_total_mb" in h and "jobs" in h
     s = client.get("/api/samples").json()
     assert s == [{"name": "tiny.png", "url": "/api/samples/tiny.png", "thumb": "/api/samples/tiny.png?w=320",
@@ -346,13 +409,14 @@ def test_create_from_sample_runs_pipeline(client, env):
     assert all(job["stages"][s]["state"] == "done" for s in job["stages"])
     assert all(job["stages"][s]["progress"] == 1 for s in job["stages"])
     assert job["stages"]["segment"]["message"] == "2 part proposals"
+    assert job["stages"]["groups"]["message"] == "3 color groups from 3 regions · edges snapped with ViTMatte · decals kept apart"
     assert job["timings"]["total_s"] >= 0
     assert job["intrinsic_method"] == "heuristic"
     assert len(job["groups"]) == 3 and job["regions_count"] == 3
     assert [g["id"] for g in job["groups"]] == [0, 1, 2]
     d = os.path.join(config.JOBS_DIR, job["id"])
     for f in ("job.json", "original.png", "work.png", "preview.jpg", "albedo.npy", "shading.npy", "residual.npy",
-              "labels.npy", "group_map.npy", "regions.json", "layers/albedo.jpg", "layers/shading.jpg",
+              "labels.npy", "group_map.npy", "islands.npy", "protect.npy", "regions.json", "layers/albedo.jpg", "layers/shading.jpg",
               "layers/residual.jpg", "layers/regions.png", "layers/groups.png", "layers/edges.png",
               "ids/regions.png", "ids/groups.png"):
         assert os.path.isfile(os.path.join(d, f)), f
@@ -361,7 +425,7 @@ def test_create_from_sample_runs_pipeline(client, env):
 
     listing = client.get("/api/jobs").json()
     assert listing[0] == {"id": job["id"], "name": "tiny.png", "created": job["created"], "status": "ready",
-                          "thumb": f"/api/jobs/{job['id']}/layers/preview", "width": 64, "height": 48, "n_groups": 3}
+                          "thumb": f"/api/jobs/{job['id']}/layers/preview?w=512", "width": 64, "height": 48, "n_groups": 3}
 
 
 def test_layers_and_id_encoders(client):
@@ -506,6 +570,11 @@ def test_group_edits(client, env):
     assert r.status_code == 200 and [g["id"] for g in r.json()["groups"]] == [0, 1, 2]
     assert client.post(f"/api/jobs/{jid}/groups/split", json={"group_id": 1, "k": 1}).status_code == 400
     assert client.post(f"/api/jobs/{jid}/groups/split", json={"k": 2}).status_code == 400
+    # a split by instance is for a part group with several instances only; an unknown mode is refused
+    r = client.post(f"/api/jobs/{jid}/groups/split", json={"group_id": 1, "mode": "instances"})
+    assert r.status_code == 400 and "instance" in r.json()["detail"]
+    assert client.post(f"/api/jobs/{jid}/groups/split", json={"group_id": 1, "mode": "diagonal"}).status_code == 400
+    assert all(g["part"] == "" and g["minor"] is False for g in client.get(f"/api/jobs/{jid}").json()["groups"])
 
     r = client.post(f"/api/jobs/{jid}/groups/move", json={"region_ids": [2], "group_id": 0})
     assert r.status_code == 200
@@ -662,9 +731,41 @@ def test_registry_reload_and_resume(env, monkeypatch):
     monkeypatch.setattr(pipeline, "registry", fresh)
     queued = []
     monkeypatch.setattr(pipeline, "enqueue", lambda j: queued.append(j.id))
+    old = time.time() - pipeline.RESUME_ACTIVE_S - 5                 # the server stopped a while ago
+    os.utime(job.path("job.json"), (old, old))
     assert pipeline.resume_pending() == 1
     assert queued == [job.id] and fresh.get(job.id).status == "queued"
     assert fresh.get(job.id).meta["stages"]["ingest"]["state"] == "idle"
+
+
+def test_resume_waits_for_a_server_that_writes_no_owner_file(env, monkeypatch):
+    """A server started from code older than owner files claims nothing, but its analysis
+    keeps rewriting job.json: while an unclaimed job shows recent progress, every unclaimed
+    job is left to it; a job it finishes is taken from disk, and the rest are resumed only
+    after they have all been quiet for RESUME_ACTIVE_S."""
+    registry = env["registry"]
+    img = imageio.load_image(_sample_image())
+    from recolor.types import AnalysisOptions
+    busy = registry.create(img, "busy.jpg", AnalysisOptions())
+    busy.set_status("analyzing")                                     # written just now
+    waiting = registry.create(img, "waiting.jpg", AnalysisOptions())   # queued behind it
+    old = time.time() - pipeline.RESUME_ACTIVE_S - 5
+    os.utime(waiting.path("job.json"), (old, old))
+    queued, started = [], []
+    monkeypatch.setattr(pipeline, "enqueue", lambda j: queued.append(j.id))
+    monkeypatch.setattr(pipeline, "_start_deferred_resume", lambda jobs: started.append(jobs))
+    assert pipeline.resume_pending() == 0 and queued == []
+    assert {j.id for j in started[0]} == {busy.id, waiting.id}
+    # the other server finishes the busy job: this server takes the record from disk
+    other = jobs.Job.load(busy.dir)
+    other.meta["status"] = "ready"
+    other.save()
+    left = pipeline._recheck_deferred(started[0])
+    assert busy.status == "ready" and [j.id for j in left] == [waiting.id] and queued == []
+    # ... and then stops (killed mid-analysis): once everything is quiet, the rest is resumed
+    os.utime(waiting.path("job.json"), (old, old))
+    assert pipeline._recheck_deferred(left) == [] and queued == [waiting.id]
+    assert registry.get(waiting.id).status == "queued"
 
 
 def test_index_served_or_placeholder(client):
@@ -867,3 +968,269 @@ def test_dot_segments_are_404_not_index(client):
         assert r.json()["error"] == "not_found"
     assert client.get("/api/health").status_code == 200
     assert client.get("/api/samples/tiny.png").status_code == 200
+
+
+def test_engine_masks_are_persisted_and_follow_group_edits(client, env):
+    """The groups stage writes islands.npy / protect.npy next to the label map; the renderer
+    (preview and full export) gets them; every edit keeps them consistent: the islands are
+    pixel facts, the protect mask is recomputed for the new grouping (regroup re-runs the
+    grouping rules); a rename alone recomputes nothing."""
+    refine = sys.modules["recolor.segmentation.refine"]
+    engine = sys.modules["recolor.engine"]
+    job = _create(client)
+    jid = job["id"]
+    d = os.path.join(config.JOBS_DIR, jid)
+    labels = np.load(os.path.join(d, "labels.npy"))
+    islands = np.load(os.path.join(d, "islands.npy"))
+    assert islands.dtype == bool and np.array_equal(islands, labels == 2)
+
+    def protect_matches_grouping():
+        gm = np.load(os.path.join(d, "group_map.npy"))
+        return np.array_equal(np.load(os.path.join(d, "protect.npy")), gm == gm.max())
+
+    assert protect_matches_grouping()
+    assert client.post(f"/api/jobs/{jid}/render", json={"mapping": {"0": "#00ff00"}}).status_code == 200
+    masks = engine.Renderer.last_masks
+    assert np.array_equal(masks["islands"], islands) and masks["protect"].dtype == bool
+
+    refine.calls.clear()
+    assert client.post(f"/api/jobs/{jid}/groups/merge", json={"group_ids": [1, 2]}).status_code == 200
+    assert refine.calls == [("after_edit", False, int(islands.sum()))]
+    assert protect_matches_grouping() and np.array_equal(np.load(os.path.join(d, "islands.npy")), islands)
+    assert client.post(f"/api/jobs/{jid}/render", json={"mapping": {}}).status_code == 200
+    assert np.array_equal(engine.Renderer.last_masks["protect"], np.load(os.path.join(d, "protect.npy")))
+
+    refine.calls.clear()
+    assert client.post(f"/api/jobs/{jid}/regroup", json={"max_groups": 3}).status_code == 200
+    assert refine.calls == [("after_edit", True, int(islands.sum()))] and protect_matches_grouping()
+    refine.calls.clear()
+    assert client.post(f"/api/jobs/{jid}/groups/split", json={"group_id": 1, "k": 2}).status_code == 200
+    assert client.post(f"/api/jobs/{jid}/groups/move", json={"region_ids": [2], "group_id": 0}).status_code == 200
+    assert [c[:2] for c in refine.calls] == [("after_edit", False)] * 2 and protect_matches_grouping()
+    refine.calls.clear()
+    assert client.patch(f"/api/jobs/{jid}/groups/1", json={"name": "Trim"}).status_code == 200
+    assert refine.calls == []
+    assert client.patch(f"/api/jobs/{jid}/groups/1", json={"locked": True}).status_code == 200
+    assert refine.calls == [("after_edit", False, int(islands.sum()))]
+
+    engine.full_calls.clear()
+    r = client.post(f"/api/jobs/{jid}/export", json={"mapping": {"0": "#00ff00"}, "quality": "full", "format": "png"})
+    assert r.status_code == 200, r.text
+    call = engine.full_calls[-1]
+    assert call["islands"].shape == (48, 64) and call["protect"].shape == (48, 64)
+    assert np.array_equal(call["islands"], islands) and call["reference_long_side"] == 64
+    assert call["glints"].shape == labels.shape                     # the working-resolution glints
+    assert call["neutral"].shape == (int(np.load(os.path.join(d, "group_map.npy")).max()) + 1, 2)   # ... and weights
+
+
+def test_jobs_analysed_before_the_masks_keep_working(client, env):
+    refine = sys.modules["recolor.segmentation.refine"]
+    engine = sys.modules["recolor.engine"]
+    job = _create(client)
+    jid = job["id"]
+    d = os.path.join(config.JOBS_DIR, jid)
+    for name in ("islands.npy", "protect.npy"):
+        os.remove(os.path.join(d, name))
+    pipeline.invalidate(env["registry"].get(jid))
+    assert client.post(f"/api/jobs/{jid}/render", json={"mapping": {"0": "#00ff00"}}).status_code == 200
+    assert engine.Renderer.last_masks == {"islands": None, "protect": None}
+    refine.calls.clear()
+    assert client.post(f"/api/jobs/{jid}/groups/merge", json={"group_ids": [1, 2]}).status_code == 200
+    assert client.patch(f"/api/jobs/{jid}/groups/0", json={"locked": True}).status_code == 200
+    assert client.post(f"/api/jobs/{jid}/regroup", json={"max_groups": 3}).status_code == 200
+    assert refine.calls == []                                        # old jobs keep the old edit behaviour
+    assert not os.path.exists(os.path.join(d, "islands.npy")) and not os.path.exists(os.path.join(d, "protect.npy"))
+    engine.full_calls.clear()
+    r = client.post(f"/api/jobs/{jid}/export", json={"mapping": {}, "quality": "full", "format": "png"})
+    assert r.status_code == 200
+    assert engine.full_calls[-1]["islands"] is None and engine.full_calls[-1]["protect"] is None
+    # a corrupt or mis-sized mask is ignored rather than breaking the job
+    np.save(os.path.join(d, "islands.npy"), np.zeros((3, 3), bool))
+    pipeline.invalidate(env["registry"].get(jid))
+    assert client.post(f"/api/jobs/{jid}/render", json={"mapping": {"0": "#00ff00"}}).status_code == 200
+    assert engine.Renderer.last_masks["islands"] is None
+
+
+def test_full_export_out_of_gpu_memory_is_retried_then_reported_busy(client, env, monkeypatch):
+    """The card is shared: a CUDA OOM in the final full-resolution render is retried once
+    and then answered with 503 and a retry hint, not a 500 (and the cache is freed)."""
+    class OutOfMemoryError(RuntimeError):
+        pass
+
+    job = _create(client)
+    jid = job["id"]
+    monkeypatch.setattr(pipeline, "_OOM_RETRY_DELAY_S", 0.0)
+    freed = []
+    monkeypatch.setattr(pipeline, "_free_cuda", lambda: freed.append(1))
+    real, calls = pipeline._render_full, []
+
+    def flaky(j, m, o, *snapshot):
+        calls.append(1)
+        if len(calls) == 1:
+            raise OutOfMemoryError("CUDA out of memory. Tried to allocate 2.00 GiB")
+        return real(j, m, o, *snapshot)
+
+    monkeypatch.setattr(pipeline, "_render_full", flaky)
+    r = client.post(f"/api/jobs/{jid}/export", json={"mapping": {}, "quality": "full", "format": "png"})
+    assert r.status_code == 200 and len(calls) == 2 and freed
+
+    def always(j, m, o, *snapshot):
+        raise OutOfMemoryError("CUDA out of memory. Tried to allocate 2.00 GiB")
+
+    monkeypatch.setattr(pipeline, "_render_full", always)
+    freed.clear()
+    r = client.post(f"/api/jobs/{jid}/export", json={"mapping": {}, "quality": "full", "format": "png"})
+    assert r.status_code == 503 and r.headers.get("retry-after") == str(pipeline.EXPORT_RETRY_AFTER_S)
+    assert r.json()["error"] == "unavailable" and "GPU is busy" in r.json()["detail"]
+    assert len(freed) >= 2                                          # freed after each failure
+
+
+def test_resume_leaves_alone_a_job_another_live_server_owns(env, monkeypatch):
+    import socket
+    registry = env["registry"]
+    img = imageio.load_image(_sample_image())
+    from recolor.types import AnalysisOptions
+    job = registry.create(img, "busy.jpg", AnalysisOptions())
+    job.set_status("analyzing")
+    other = os.getppid()                                            # alive, and not this process
+    with open(job.path(pipeline.OWNER_FILE), "w") as f:
+        json.dump({"pid": other, "host": socket.gethostname(), "start": pipeline._process_start(other)}, f)
+    queued = []
+    monkeypatch.setattr(pipeline, "enqueue", lambda j: queued.append(j.id))
+    assert pipeline.resume_pending() == 0 and queued == []
+    assert registry.get(job.id).status == "analyzing"               # untouched
+    # the owner is gone (a pid that is not running): the job is resumed
+    with open(job.path(pipeline.OWNER_FILE), "w") as f:
+        json.dump({"pid": 2 ** 22 + 4321, "host": socket.gethostname(), "start": "1"}, f)
+    assert pipeline.resume_pending() == 1 and queued == [job.id]
+    # a pid that was reused by an unrelated process (other start time) does not count as the owner
+    with open(job.path(pipeline.OWNER_FILE), "w") as f:
+        json.dump({"pid": other, "host": socket.gethostname(), "start": "not-its-start-time"}, f)
+    job.set_status("analyzing")
+    queued.clear()
+    assert pipeline.resume_pending() == 1
+
+
+def test_analysis_claims_the_job_and_releases_it(client, env, monkeypatch):
+    job = _create(client)
+    j = env["registry"].get(job["id"])
+    pipeline._claim(j)                                               # what the real enqueue does
+    with open(j.path(pipeline.OWNER_FILE)) as f:
+        owner = json.load(f)
+    assert owner["pid"] == os.getpid() and not pipeline._owned_elsewhere(j)   # our own claim never blocks us
+    pipeline.analyze(j)
+    assert j.status == "ready" and not os.path.exists(j.path(pipeline.OWNER_FILE))   # released at the end
+
+
+def test_full_export_drops_a_full_res_decomposition_that_drifted_from_the_preview(client, env, monkeypatch):
+    job = _create(client)
+    jid = job["id"]
+    env["registry"].get(jid).update(intrinsic_method="careaga")
+    monkeypatch.setattr(pipeline, "_fullres_intrinsic_fits", lambda n: True)
+    intr = sys.modules["recolor.intrinsic"]
+    real = intr.decompose
+
+    def drifted(image, method="auto", progress=None):
+        res = real(image, method="careaga", progress=progress)
+        res.albedo = np.clip(res.albedo * 0.4, 0, 1)                 # a different paint / light split
+        res.residual = imageio.srgb_to_linear(imageio.to_float(image)) - res.albedo * res.shading
+        return res
+
+    monkeypatch.setattr(intr, "decompose", drifted)
+    r = client.post(f"/api/jobs/{jid}/export", json={"mapping": {"0": "#00ff00"}, "quality": "full", "format": "png"})
+    assert r.status_code == 200 and r.json()["intrinsic"] == "upsampled"
+    # an identity export cannot drift: the full-res layers are kept
+    r = client.post(f"/api/jobs/{jid}/export", json={"mapping": {}, "quality": "full", "format": "png"})
+    assert r.status_code == 200 and r.json()["intrinsic"] == "careaga"
+    # the verdict is known now: the next export of that mapping does not run the model pass
+    cached = os.path.join(config.JOBS_DIR, jid, pipeline.FULLRES_ALBEDO_FILE.format(method="careaga"))
+    assert os.path.isfile(cached)
+    monkeypatch.setattr(intr, "decompose", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not run")))
+    r = client.post(f"/api/jobs/{jid}/export", json={"mapping": {"0": "#00ff00"}, "quality": "full", "format": "png"})
+    assert r.status_code == 200 and r.json()["intrinsic"] == "upsampled"
+
+
+def test_a_full_export_reads_its_snapshot_before_taking_the_gpu_lock(client, env, monkeypatch):
+    """A group edit holds the job's edit lock while it waits for the GPU lock: an export that
+    held the GPU lock while it waited to read the grouping could deadlock with it."""
+    job = _create(client)
+    jid = job["id"]
+    real, seen = pipeline._snapshot, []
+
+    def snapshot(j, build):
+        seen.append(pipeline.gpu_lock._is_owned())
+        return real(j, build)
+
+    monkeypatch.setattr(pipeline, "_snapshot", snapshot)
+    r = client.post(f"/api/jobs/{jid}/export", json={"mapping": {"0": "#00ff00"}, "quality": "full", "format": "png"})
+    assert r.status_code == 200 and seen and not any(seen)
+
+
+def test_ignore_background_is_a_job_setting_with_effect(client, env):
+    """New jobs ignore their background: background groups are locked for the renderer and
+    left out of suggestions; the setting persists through PUT /state and can be turned off."""
+    job = _create(client)
+    jid = job["id"]
+    assert job["ignore_background"] is True
+    r = client.patch(f"/api/jobs/{jid}/groups/1", json={"is_background": True})
+    assert r.status_code == 200
+    g1 = next(g for g in r.json()["groups"] if g["id"] == 1)
+    assert g1["is_background"] is True and g1["locked"] is False        # the stored flags: the user's own lock stays off
+    r = client.post(f"/api/jobs/{jid}/mapping/suggest", json={"colors": ["#ff0000", "#00ff00", "#0000ff"], "strategy": "hue"})
+    assert r.json()["mapping"]["1"] is None                              # a background group is never suggested
+    renderer = pipeline.get_renderer(env["registry"].get(jid))
+    assert next(g for g in renderer.layers[4] if g.id == 1).locked      # and locked for the renderer
+    r = client.put(f"/api/jobs/{jid}/state", json={"ignore_background": False})
+    assert r.status_code == 200 and r.json()["ignore_background"] is False
+    with open(os.path.join(config.JOBS_DIR, jid, "job.json")) as f:
+        assert json.load(f)["ignore_background"] is False
+    assert not next(g for g in pipeline.get_renderer(env["registry"].get(jid)).layers[4] if g.id == 1).locked
+    r = client.post(f"/api/jobs/{jid}/mapping/suggest", json={"colors": ["#ff0000", "#00ff00", "#0000ff"], "strategy": "hue"})
+    assert r.json()["mapping"]["1"] is not None                          # with the setting off it is a group like any other
+    assert client.put(f"/api/jobs/{jid}/state", json={"ignore_background": "yes"}).status_code == 400
+    # the user can unmark it again
+    r = client.patch(f"/api/jobs/{jid}/groups/1", json={"is_background": False})
+    assert next(g for g in r.json()["groups"] if g["id"] == 1)["is_background"] is False
+
+
+def test_group_patch_rejects_non_boolean_flags_and_non_string_names(client, env):
+    """PATCH /groups/{gid} takes true / false for the flags and a string for the name, as
+    PUT /state does for ignore_background: "false" or "x" must not flag a group."""
+    job = _create(client)
+    jid = job["id"]
+    before = next(g for g in job["groups"] if g["id"] == 0)
+    for body in ({"is_background": "x"}, {"is_background": "false"}, {"locked": 1}, {"locked": "true"},
+                 {"name": 5}, {"name": ["a"]}, {"name": "Fine", "locked": "yes"}):
+        r = client.patch(f"/api/jobs/{jid}/groups/0", json=body)
+        assert r.status_code == 400, body
+    after = next(g for g in client.get(f"/api/jobs/{jid}").json()["groups"] if g["id"] == 0)
+    assert (after["name"], after["locked"], after["is_background"]) == (before["name"], False, False)
+    r = client.patch(f"/api/jobs/{jid}/groups/0", json={"is_background": True, "locked": False, "name": "Wall"})
+    g0 = next(g for g in r.json()["groups"] if g["id"] == 0)
+    assert r.status_code == 200 and g0["is_background"] is True and g0["locked"] is False and g0["name"] == "Wall"
+    # a null leaves that field as it is (200, nothing changed); a name longer than 48
+    # characters is refused rather than cut silently, one of 48 (padded) is kept whole
+    r = client.patch(f"/api/jobs/{jid}/groups/0", json={"name": None, "locked": None, "is_background": None})
+    g0 = next(g for g in r.json()["groups"] if g["id"] == 0)
+    assert r.status_code == 200 and (g0["name"], g0["locked"], g0["is_background"]) == ("Wall", False, True)
+    r = client.patch(f"/api/jobs/{jid}/groups/0", json={"name": "n" * 49})
+    assert r.status_code == 400 and "48" in r.json()["detail"]
+    r = client.patch(f"/api/jobs/{jid}/groups/0", json={"name": "  " + "n" * 48 + " "})
+    assert r.status_code == 200 and next(g for g in r.json()["groups"] if g["id"] == 0)["name"] == "n" * 48
+
+
+def test_layer_thumbnails_are_served_at_the_requested_width(client, env):
+    """`?w=` on an image layer gives a cached JPEG at that width (never upscaled), which is
+    what the JobSummary's `thumb` points at; the plain layer is untouched."""
+    from PIL import Image
+    job = _create(client)
+    jid = job["id"]
+    r = client.get(f"/api/jobs/{jid}/layers/preview?w=32")
+    assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg"
+    assert Image.open(io.BytesIO(r.content)).size == (32, 24)
+    assert os.path.isfile(os.path.join(config.JOBS_DIR, jid, "thumbs", "preview_w32.jpg"))
+    r = client.get(f"/api/jobs/{jid}/layers/preview?w=512")             # the summary's thumb: not upscaled
+    assert r.status_code == 200 and Image.open(io.BytesIO(r.content)).size == (64, 48)
+    r = client.get(f"/api/jobs/{jid}/layers/preview")
+    assert r.status_code == 200 and Image.open(io.BytesIO(r.content)).size == (64, 48)
+    assert client.get(f"/api/jobs/{jid}/layers/nope?w=32").status_code == 404

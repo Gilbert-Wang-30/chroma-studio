@@ -21,3 +21,6 @@ imageio
 beautifulsoup4
 requests
 matplotlib
+# ViTMatte edge snap at analysis time (recolor/segmentation/matting.py). Pinned: installed
+# with a constraints file so it cannot move torch / torchvision / numpy / opencv (see setup.sh).
+transformers==5.17.0

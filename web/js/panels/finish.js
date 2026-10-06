@@ -86,16 +86,28 @@ export function createFinishPanel(store, actions) {
     }
   }
 
+  /** What produced the export's layers, when it was not the preview's own decomposition. */
+  function intrinsicNote(res) {
+    if (res.intrinsic === 'upsampled') return 'Layers upsampled from the working resolution';
+    if (res.intrinsic === 'heuristic') return 'Heuristic decomposition';
+    return null;
+  }
+
   function renderExport(res) {
     const name = decodeURIComponent(res.url.split('/').pop() || 'export');
+    const note = intrinsicNote(res);
     exportResult.hidden = false;
     exportResult.replaceChildren(
       h('div.export-file',
         h('span.export-icon', icon('check', { size: 16 })),
         h('div.export-info',
-          h('div.export-name', name),
-          h('div.export-meta.mono', `${formatDims(res.width, res.height)} · ${formatMs(res.ms)}`)),
-        h('a.btn.btn-sm.btn-primary', { href: res.url, download: name }, icon('download', { size: 14 }), 'Download')),
+          tip(h('div.export-name', name), name),          // the long file name is ellipsised; hover shows it whole
+          // two items (size, time) so a narrow info column wraps the time onto its own line
+          h('div.export-meta.mono', h('span', formatDims(res.width, res.height)), h('span', formatMs(res.ms))),
+          note ? h('div.export-note', note) : null),
+        // icon-only in a narrow inspector (CSS container query); the label stays for readers
+        h('a.btn.btn-sm.btn-primary.export-download', { href: res.url, download: name, aria: { label: 'Download' } },
+          icon('download', { size: 14 }), h('span.btn-label', 'Download'))),
     );
     enter(exportResult);
     pop(exportResult);

@@ -4,6 +4,10 @@
     .venv/bin/python scripts/dev_segment.py samples/street_complex_1.jpg --detail max
     .venv/bin/python scripts/dev_segment.py samples/motorcycle_1.jpg --detail all
 
+Runs the same chain as the pipeline: SAM proposals, Florence-2 lettering and named parts
+(Balanced and Max), the region hierarchy, part recovery (Balanced and Max), the BiRefNet
+matte cut and backdrop decisions, grouping (with the photo: one paint under different
+light) and the group refinement (highlights, decals, ViTMatte edge snap, locks).
 Writes to scratch/ (or --out):
     <name>_regions.png   random color per region, blended over the image, with edges
     <name>_groups.png    flat group albedo colors with group boundaries
@@ -27,6 +31,8 @@ sys.path.insert(0, ROOT)
 
 from recolor import config, filters, imageio  # noqa: E402
 from recolor.segmentation import SamMasker, build_regions, group_regions  # noqa: E402
+from recolor.segmentation import florence, foreground, grouping, matting, refine, smallparts  # noqa: E402
+from recolor.segmentation.hierarchy import cut_on_matte, recover_parts  # noqa: E402
 from recolor.segmentation.labelops import adjacency  # noqa: E402
 
 DETAILS = ("fast", "balanced", "max")
@@ -135,13 +141,30 @@ def run_one(image: np.ndarray, albedo: np.ndarray, detail: str, args, stem: str,
     masks = masker.generate(image, detail=detail)
     t_sam = time.perf_counter() - t0
     t0 = time.perf_counter()
-    labels, info = build_regions(image, albedo, masks, detail=detail)
+    extras = None
+    if detail != "fast":            # as the pipeline's regions stage: lettering and named parts
+        analysis = florence.analyse(image)
+        extras = smallparts.find_extras(image, albedo, analysis, masker.prompt_boxes) or None
+    labels, info = build_regions(image, albedo, masks, detail=detail, extra=extras)
+    n_parts = 0
+    if detail != "fast":            # ... and small parts SAM missed
+        labels, info, n_parts = recover_parts(image, albedo, labels, info, prompter=masker.prompt_parts)
+    fg = foreground.fg_prob(image)
+    n_cut = 0
+    if fg is not None:              # the matte: cut along the silhouette, decide the backdrop
+        labels, info, n_cut = cut_on_matte(labels, info, fg, albedo)
+        kinds = grouping.backdrop_decisions(labels, albedo, info, fg, delta_e=args.delta_e, max_groups=args.max_groups)
+        for d in info:
+            d["bg"] = int(kinds[int(d["id"])])
     t_reg = time.perf_counter() - t0
     t0 = time.perf_counter()
-    regions, groups, group_map = group_regions(labels, albedo, info, args.max_groups, args.delta_e)
+    regions, groups, group_map = group_regions(labels, albedo, info, args.max_groups, args.delta_e, photo_rgb_u8=image)
+    res = refine.refine_groups(image, albedo, labels, regions, groups, group_map, matting.snap_labels)
+    labels, regions, groups, group_map = res.labels, res.regions, res.groups, res.group_map
     t_grp = time.perf_counter() - t0
+    print(f"             extras {len(extras or [])}; recovered parts {n_parts}; matte cuts {n_cut}; refinement {res.report}")
     vram = torch.cuda.max_memory_allocated() / 2**20 if torch.cuda.is_available() else 0.0
-    sources = {s: sum(1 for d in info if d["source"] == s) for s in ("sam", "split", "superpixel")}
+    sources = {s: sum(1 for d in info if d["source"] == s) for s in ("sam", "split", "superpixel", "small", "text", "wheel", "named", "prompt", "part")}
     areas = np.array([d["area"] for d in info])
     print(f"  [{detail:8s}] SAM {t_sam:6.2f} s ({len(masks):4d} proposals) | regions {t_reg:5.2f} s "
           f"({len(info):4d}: {sources}) | groups {t_grp:5.2f} s ({len(groups):3d}) | "
@@ -149,7 +172,7 @@ def run_one(image: np.ndarray, albedo: np.ndarray, detail: str, args, stem: str,
     print(f"             region area px: min {areas.min()} median {int(np.median(areas))} max {areas.max()}; "
           f"adjacent pairs {len(adjacency(labels, len(info))[0])}")
     for g in groups[:12]:
-        flag = " bg" if g.is_background else ""
+        flag = (" bg" if g.is_background else "") + (" locked" if g.locked else "") + (f" {g.finish}" if g.finish else "")
         print(f"             g{g.id:<3d} {g.name:<14s} {g.albedo_hex} {g.hue_family:<8s} "
               f"{100 * g.area_frac:5.1f}%  {len(g.region_ids):4d} regions{flag}")
     if len(groups) > 12:
@@ -190,6 +213,9 @@ def main() -> int:
             results.append(run_one(image, albedo, d, args, stem, suffix))
     finally:
         SamMasker.instance().release()
+        matting.release()
+        florence.release()
+        foreground.release()
         intrinsic_note = release_intrinsic()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

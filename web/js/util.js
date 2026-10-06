@@ -75,11 +75,13 @@ export function hexToHsl(hex) {
 export const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 export const lerp = (a, b, t) => a + (b - a) * t;
 
-/** Percentage string with sensible precision: 0.0034 -> "0.3%", 0.42 -> "42%". */
+/** Percentage string with sensible precision: 0.0034 -> "0.34%", 0.42 -> "42%"; a share too
+ *  small to show at two decimals reads "<0.01%", never "0.00%" (a 58 px group is not empty). */
 export function formatPct(frac) {
   const p = frac * 100;
   if (p >= 10) return `${Math.round(p)}%`;
   if (p >= 1) return `${p.toFixed(1)}%`;
+  if (p > 0 && p < 0.005) return '<0.01%';
   return `${p.toFixed(2)}%`;
 }
 

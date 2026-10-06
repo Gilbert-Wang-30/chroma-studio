@@ -28,7 +28,7 @@ export function createMappingPanel(store, actions) {
   strategy.value = store.get().strategy;
   strategy.addEventListener('change', () => store.set({ strategy: strategy.value }));
   const suggestBtn = h('button.btn.btn-primary.btn-sm', { type: 'button', onClick: () => onSuggest() }, icon('spark', { size: 14 }), 'Suggest');
-  tip(suggestBtn, 'Assign palette colours to groups automatically');
+  tip(suggestBtn, 'Assign palette colours to groups automatically', 'left');
 
   const list = h('ul.map-list', { role: 'list' });
   const empty = h('div.panel-empty', { hidden: true }, icon('arrow', { size: 22 }), h('p', 'Groups appear here once the analysis is done.'));
@@ -65,7 +65,7 @@ export function createMappingPanel(store, actions) {
     const targetLabel = h('span.map-target-label', 'Original');
     const targetBtn = h('button.map-target', { type: 'button', aria: { label: `Pick target colour for ${g.name}` }, onClick: () => picker.click() }, targetFace, targetLabel, picker);
     const clear = h('button.btn-icon.map-clear', { type: 'button', aria: { label: 'Keep original colour' }, onClick: (e) => { e.stopPropagation(); store.setTarget(g.id, null); } }, icon('x', { size: 12 }));
-    tip(clear, 'Keep original');
+    tip(clear, 'Keep original', 'left');
     const name = h('span.map-name', g.name);
     const flags = h('span.map-flags');
     const li = h('li.map-row', {
@@ -74,7 +74,7 @@ export function createMappingPanel(store, actions) {
       onMouseleave: () => { if (store.get().hoverGroup === g.id) store.set({ hoverGroup: null }); },
       onClick: (e) => { if (!(e.target instanceof Element && e.target.closest('button, input'))) store.select(g.id); },
       onDragover: (e) => {
-        if (!e.dataTransfer.types.includes(COLOR_DRAG_TYPE) || store.groupById(g.id)?.locked) return;
+        if (!e.dataTransfer.types.includes(COLOR_DRAG_TYPE) || isLocked(store.groupById(g.id))) return;
         e.preventDefault();
         e.dataTransfer.dropEffect = 'copy';
         li.classList.add('is-drop-target');
@@ -114,16 +114,27 @@ export function createMappingPanel(store, actions) {
     else if (g) row.picker.value = g.albedo_hex;
   }
 
+  /** Locked in effect: the user's lock, or a background group while the background is ignored. */
+  function isLocked(g) {
+    return Boolean(g && (g.locked || (g.is_background && store.get().ignoreBackground)));
+  }
+
   function updateRow(row, g, hex) {
+    const locked = isLocked(g);
     row.name.textContent = g.name;
-    row.li.classList.toggle('is-locked', g.locked);
+    // Rows are reused by group id, and edits renumber ids, so the labels must follow the name.
+    row.picker.setAttribute('aria-label', `Target colour for ${g.name}`);
+    row.targetBtn.setAttribute('aria-label', `Pick target colour for ${g.name}`);
+    row.li.classList.toggle('is-locked', locked);
     row.li.querySelector('.map-source').style.setProperty('--swatch', g.albedo_hex);
     row.li.querySelector('.map-sub').textContent = g.albedo_hex;
+    // Icon-only flags: the row is narrow and the name is what tells the groups apart
+    // (the Groups panel above spells the flags out).
     replace(row.flags,
-      g.locked ? tip(h('span.badge.badge-lock', icon('lock', { size: 10 }), 'Locked'), 'Locked groups are never recolored') : null,
-      g.is_background ? h('span.badge.badge-bg', 'Background') : null);
-    row.targetBtn.disabled = g.locked;
-    paintTarget(row, g.locked ? null : hex, g);
+      locked ? tip(h('span.badge.badge-lock.badge-icon', { aria: { label: 'Locked' }, role: 'img' }, icon('lock', { size: 10 })), g.locked ? 'Locked: never recolored' : 'Background: ignored') : null,
+      g.is_background ? tip(h('span.badge.badge-bg.badge-icon', { aria: { label: 'Background' }, role: 'img' }, icon('image', { size: 10 })), 'Background') : null);
+    row.targetBtn.disabled = locked;
+    paintTarget(row, locked ? null : hex, g);
   }
 
   function render(state) {
@@ -154,7 +165,7 @@ export function createMappingPanel(store, actions) {
   }
 
   const offs = [
-    store.watch(render, ['groups', 'mapping']),
+    store.watch(render, ['groups', 'mapping', 'ignoreBackground']),
     store.subscribe((s) => renderSelection(s.selection), ['selection']),
     store.subscribe((s) => { strategy.value = s.strategy; }, ['strategy']),
   ];

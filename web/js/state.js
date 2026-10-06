@@ -77,6 +77,7 @@ export function createStudioStore(job) {
     palette: null,                        // Palette JSON or null
     mapping: normalizeMapping(job.mapping),
     renderOptions: { ...DEFAULT_RENDER_OPTIONS, ...(job.render_options || {}) },
+    ignoreBackground: job.ignore_background !== false,   // on unless the job says otherwise
     strategy: 'balanced',
     layer: 'result',
     compare: false,
@@ -86,6 +87,9 @@ export function createStudioStore(job) {
     hoverGroup: null,                     // group id hovered in the list (UI -> viewer)
     render: { busy: false, ms: null, error: null, count: 0 },
     idsVersion: 0,                        // bumped when ids/* must be re-fetched
+    tool: null,                           // 'segment' while Select part is on
+    find: null,                           // Find part: {text, busy, candidates, detector, error} or null
+    findHover: -1,                        // the Find part candidate under the pointer (or its chip)
     lastExport: null,
     analysisStartedAt: null,
   });
@@ -144,18 +148,23 @@ export function createStudioStore(job) {
     canRedo: () => redo.length > 0,
     /** Apply a fresh Job JSON from the server (groups may have been renumbered). */
     applyJob(nextJob, { keepMapping = true } = {}) {
-      const validIds = new Set((nextJob.groups || []).map((g) => String(g.id)));
+      const nextGroups = nextJob.groups || [];
+      const validIds = new Set(nextGroups.map((g) => String(g.id)));
       const current = store.get().mapping;
       const mapping = keepMapping
         ? Object.fromEntries(Object.entries(current).filter(([k]) => validIds.has(k)))
         : normalizeMapping(nextJob.mapping);
       const sel = store.get().selection;
-      // Group ids are renumbered by merge/split/regroup, so keep only what still exists.
-      const keptIds = (sel.groupIds || []).filter((id) => validIds.has(String(id)));
-      const keptPrimary = validIds.has(String(sel.groupId)) ? sel.groupId : (keptIds[keptIds.length - 1] ?? null);
+      // Merge, split, move and regroup renumber the groups, so an id may now name another
+      // group (after merging 3 and 4, "4" is the next group down). Follow each selected
+      // group by its regions instead: it becomes the group now holding most of them.
+      const follow = remapGroupIds(store.get().groups, nextGroups);
+      const keptIds = [...new Set((sel.groupIds || []).map(follow).filter((id) => id !== null))];
+      const primary = sel.groupId === null || sel.groupId === undefined ? null : follow(sel.groupId);
+      const keptPrimary = primary ?? (keptIds[keptIds.length - 1] ?? null);
       store.set({
         job: nextJob,
-        groups: nextJob.groups || [],
+        groups: nextGroups,
         mapping: sameMapping(mapping, current) ? current : mapping,
         selection: keptPrimary === null && !keptIds.length && !sel.regionIds.length
           ? { groupId: null, groupIds: [], regionIds: [] }
@@ -192,6 +201,31 @@ export function createStudioStore(job) {
     groupById(gid) { return store.get().groups.find((g) => String(g.id) === String(gid)) || null; },
     groupForRegion(rid) { return store.get().groups.find((g) => g.region_ids.includes(rid)) || null; },
   });
+}
+
+/**
+ * A function from an old group id to the id of the new group holding the majority of its
+ * regions (by count), or null when no new group holds more than half of them. Region ids are stable across group edits, so this follows a group through a merge
+ * (both parts map to the merged group), a split (to the part that kept most regions) or a
+ * renumbering, where comparing ids alone would jump to an unrelated group.
+ */
+export function remapGroupIds(oldGroups, newGroups) {
+  const regionToNew = new Map();
+  for (const g of newGroups || []) for (const rid of g.region_ids || []) regionToNew.set(rid, g.id);
+  const byId = new Map((oldGroups || []).map((g) => [String(g.id), g]));
+  return (gid) => {
+    const old = byId.get(String(gid));
+    if (!old || !(old.region_ids || []).length) return null;
+    const votes = new Map();
+    for (const rid of old.region_ids) {
+      const to = regionToNew.get(rid);
+      if (to !== undefined) votes.set(to, (votes.get(to) || 0) + 1);
+    }
+    let best = null;
+    let bestN = 0;
+    for (const [to, n] of votes) if (n > bestN) { best = to; bestN = n; }
+    return bestN * 2 > old.region_ids.length ? best : null;
+  };
 }
 
 function sameMapping(a, b) {

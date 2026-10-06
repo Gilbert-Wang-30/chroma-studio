@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import asynccontextmanager
+import math
 import mimetypes
 import os
 import queue
@@ -31,6 +32,10 @@ from ..pipeline import PipelineError
 from ..types import Palette, mapping_to_json
 
 MAX_UPLOAD_BYTES = 60 * 1024 * 1024
+MAX_JSON_BYTES = 1 << 20
+#: A JSON body over the limit is read (and thrown away) up to this size before its 413, so the client
+#: reads the answer instead of a reset connection; beyond it the 413 comes at once.
+MAX_DRAIN_BYTES = 16 << 20
 SSE_HEARTBEAT_S = 15.0
 SSE_POLL_S = 0.05
 THUMB_MIN_W, THUMB_MAX_W = 16, 2048
@@ -74,20 +79,96 @@ def _job_or_404(job_id: str) -> jobs.Job:
     return job
 
 
-def _json_body(request: Request) -> dict[str, Any]:
-    """Parse a JSON object body from inside a sync handler (FastAPI runs those on an
-    anyio worker thread, so the async body read is bridged with `from_thread.run`)."""
-    import anyio
-    raw = anyio.from_thread.run(request.body)
-    if not raw or not raw.strip():
-        return {}
+def _no_constant(name: str) -> Any:
+    raise ValueError(f"{name} is not a JSON number")
+
+
+def _finite_float(text: str) -> float:
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError(f"{text[:24]} is out of range")
+    return value
+
+
+def _parse_json(raw: bytes) -> Any:
+    """``json.loads`` with every failure a 400: invalid JSON or UTF-8, a body nested too deeply
+    for the parser (100 000 '[' raised RecursionError, which is no ValueError: a 500), the NaN /
+    Infinity literals Python's parser accepts but JSON has not, and a number too large for a float
+    (``1e400`` parsed as inf; ``int(inf)`` in a validator was an OverflowError: a 500). Integers stay
+    exact (validators bound them)."""
     try:
-        data = json.loads(raw)
+        return json.loads(raw, parse_constant=_no_constant, parse_float=_finite_float)
+    except RecursionError:
+        raise ApiError(400, "bad_json", "request body is nested too deeply") from None
     except ValueError as e:
         raise ApiError(400, "bad_json", f"request body is not valid JSON: {e}") from None
+
+
+async def _read_limited(request: Request, limit: int = MAX_JSON_BYTES) -> bytes:
+    """The request body, read chunk by chunk: past ``limit`` nothing more is kept (a chunked body
+    without Content-Length, of several GB, was read whole into memory before its size was checked)
+    and the answer is a 413, once the rest was read and thrown away up to `MAX_DRAIN_BYTES`, so the
+    client that is still sending reads the 413 (a reply before the body is read makes the server
+    reset the connection under a client still writing: urllib saw "Connection reset by peer").
+    Also stored as the request's body."""
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > limit:
+            chunks = []
+            if total > MAX_DRAIN_BYTES:
+                break
+            continue
+        chunks.append(chunk)
+    if total > limit:
+        raise ApiError(413, "too_large", "JSON body too large")
+    raw = b"".join(chunks)
+    request._body = raw                                   # noqa: SLF001 - request.body() answers it
+    return raw
+
+
+def _json_body(request: Request) -> dict[str, Any]:
+    """Parse a JSON object body from inside a sync handler (FastAPI runs those on an
+    anyio worker thread, so the async body read is bridged with `from_thread.run`). At most
+    `MAX_JSON_BYTES` (413 beyond, from the Content-Length when it says more than `MAX_DRAIN_BYTES`,
+    else once the chunks pass the limit: every JSON body of the API is a few kB)."""
+    import anyio
+    length = request.headers.get("content-length")
+    if length and length.isdigit() and int(length) > MAX_DRAIN_BYTES:
+        raise ApiError(413, "too_large", "JSON body too large")
+    raw = anyio.from_thread.run(_read_limited, request)
+    if not raw or not raw.strip():
+        return {}
+    data = _parse_json(raw)
     if not isinstance(data, dict):
         raise ApiError(400, "bad_json", "request body must be a JSON object")
     return data
+
+
+#: How long a disconnect check listens for the client's goodbye (the body is read already, so the
+#: only message left is ``http.disconnect``).
+DISCONNECT_POLL_S = 0.005
+
+
+def _client_gone(request: Request):
+    """A check a sync handler's pipeline call runs while it waits for the GPU (`pipeline._prompt_gpu`):
+    True once the client closed the connection (the studio aborts a superseded click). It listens
+    for the client's goodbye for a few ms: ``Request.is_disconnected`` never saw it behind this app's
+    HTTP middleware (measured: still False 3 s after the client closed; this check: 35 ms)."""
+    import anyio
+    state = {"gone": False}
+
+    async def poll() -> bool:
+        if not state["gone"]:
+            with anyio.move_on_after(DISCONNECT_POLL_S):
+                message = await request.receive()
+                state["gone"] = message.get("type") == "http.disconnect"
+        return state["gone"]
+
+    def gone() -> bool:
+        return bool(anyio.from_thread.run(poll))
+    return gone
 
 
 def _has_dot_segments(request: Request) -> bool:
@@ -159,7 +240,7 @@ def _thumb(path: str, width: int, cache_dir: str) -> str:
     img = imageio.load_image(path)
     if img.shape[1] > width:
         img = imageio.resize_to(img, (width, max(1, round(img.shape[0] * width / img.shape[1]))))
-    tmp = out + ".tmp.jpg"
+    tmp = f"{out}.{os.getpid()}-{os.urandom(4).hex()}.tmp.jpg"   # unique: concurrent first requests must not share it
     imageio.save_image(tmp, img, quality=88)
     os.replace(tmp, out)
     return out
@@ -193,7 +274,10 @@ def create_app(warmup: bool = False) -> FastAPI:
 
     @app.exception_handler(PipelineError)
     async def _pipeline_error(_: Request, e: PipelineError):
-        return _error(e.status, e.message)
+        resp = _error(e.status, e.message)
+        if getattr(e, "retry_after", None):
+            resp.headers["Retry-After"] = str(int(e.retry_after))
+        return resp
 
     @app.exception_handler(StarletteHTTPException)
     async def _http_error(_: Request, e: StarletteHTTPException):
@@ -310,13 +394,10 @@ def create_app(warmup: bool = False) -> FastAPI:
                 if isinstance(v, str):
                     fields[k] = v
         else:
-            raw = await request.body()
-            if len(raw) > 1 << 20:
+            if length and length.isdigit() and int(length) > MAX_DRAIN_BYTES:
                 raise ApiError(413, "too_large", "JSON body too large")
-            try:
-                body = json.loads(raw or b"{}")
-            except ValueError as e:
-                raise ApiError(400, "bad_json", f"request body is not valid JSON: {e}") from None
+            raw = await _read_limited(request)
+            body = _parse_json(raw or b"{}")
             if not isinstance(body, dict):
                 raise ApiError(400, "bad_json", "request body must be a JSON object")
             fields = body
@@ -338,13 +419,18 @@ def create_app(warmup: bool = False) -> FastAPI:
 
     @app.get("/api/jobs/{job_id}")
     def get_job(job_id: str):
-        return _job_or_404(job_id).snapshot()
+        job = _job_or_404(job_id)
+        pipeline.refresh_panel_view(job)          # a view of an older panel rule, in memory only
+        return job.snapshot()
 
     @app.delete("/api/jobs/{job_id}")
     def delete_job(job_id: str):
         job = _job_or_404(job_id)
         pipeline.invalidate(job)
         jobs.registry.delete(job.id)
+        # again once the job is flagged deleted and gone: a prompt that cached the job's embedding
+        # between the two finds the flag and drops it itself (`pipeline._prompt_session`)
+        pipeline.invalidate(job)
         return {"ok": True}
 
     @app.get("/api/jobs/{job_id}/events")
@@ -354,6 +440,7 @@ def create_app(warmup: bool = False) -> FastAPI:
         15 s. `?once=1` closes after the replay; `?timeout=S` closes after S seconds
         without an event (both handy for curl and tests)."""
         job = _job_or_404(job_id)
+        await run_in_threadpool(pipeline.refresh_panel_view, job)
         q = job.subscribe()   # subscribe before the snapshot so nothing falls in the gap
         replay = job.replay_events()
         idle_limit = timeout if timeout and timeout > 0 else None
@@ -394,13 +481,21 @@ def create_app(warmup: bool = False) -> FastAPI:
                                  headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no", "Connection": "keep-alive"})
 
     @app.get("/api/jobs/{job_id}/layers/{layer}")
-    def job_layer(job_id: str, layer: str):
+    def job_layer(job_id: str, layer: str, w: Optional[int] = None):
+        """An image layer; with `?w=` a cached JPEG thumbnail at that width (never upscaled,
+        kept under the job's `thumbs/`), which is what the gallery and the recent-jobs row
+        load instead of the 1024 px preview."""
         job = _job_or_404(job_id)
         if layer not in LAYER_FILES:
             raise ApiError(404, "unknown_layer", f"layer must be one of {sorted(LAYER_FILES)}")
         for rel in LAYER_FILES[layer]:
             p = job.path(*rel.split("/"))
+            if not os.path.isfile(p) and layer in pipeline.DISPLAY_LAYERS:
+                p = pipeline.display_layer(job, layer) or p       # an edit left it to be drawn on demand
             if os.path.isfile(p):
+                if w:
+                    return FileResponse(_thumb(p, int(w), job.path("thumbs")), media_type="image/jpeg",
+                                        headers={"Cache-Control": "no-cache"})
                 return FileResponse(p, media_type=mimetypes.guess_type(p)[0] or "application/octet-stream",
                                     headers={"Cache-Control": "no-cache"})
         raise ApiError(404, "layer_not_ready", f"layer {layer!r} is not available yet (job is {job.status})")
@@ -419,8 +514,11 @@ def create_app(warmup: bool = False) -> FastAPI:
 
     def _edit(job_id: str, kind: str, payload: dict[str, Any]) -> dict[str, Any]:
         job = _job_or_404(job_id)
-        pipeline.apply_group_edit(job, kind, payload)
-        return job.snapshot()
+        extra = pipeline.apply_group_edit(job, kind, payload)
+        snap = job.snapshot()
+        if isinstance(extra, dict):
+            snap.update(extra)                    # Remove part: removed_part {name, restored, home}
+        return snap
 
     @app.post("/api/jobs/{job_id}/groups/merge")
     def groups_merge(job_id: str, request: Request):
@@ -445,6 +543,26 @@ def create_app(warmup: bool = False) -> FastAPI:
     @app.post("/api/jobs/{job_id}/regroup")
     def regroup(job_id: str, request: Request):
         return _edit(job_id, "regroup", _json_body(request))
+
+    # ------------------------------------------------------------------ Select part / Find part
+
+    @app.post("/api/jobs/{job_id}/segment")
+    def segment(job_id: str, request: Request):
+        """SAM 2 prompted by points ([x, y, 1|0], work pixels) and / or a box: the mask as a
+        1-bit PNG of its bounding box, with the alternatives, SAM's score and the ``pick`` /
+        ``crop`` a commit sends back. An empty prompt prepares the image embedding only. A prompt
+        whose client went away (a superseded click) stops waiting for the GPU."""
+        return pipeline.segment(_job_or_404(job_id), _json_body(request), cancelled=_client_gone(request))
+
+    @app.post("/api/jobs/{job_id}/groups/from_mask")
+    def groups_from_mask(job_id: str, request: Request):
+        """Commit a prompt (re-run here; a client mask is never used) as a new user part group."""
+        return pipeline.add_user_part(_job_or_404(job_id), _json_body(request))
+
+    @app.post("/api/jobs/{job_id}/find")
+    def find(job_id: str, request: Request):
+        """Up to five candidate parts for a phrase (OWLv2 boxes prompted as SAM boxes)."""
+        return pipeline.find_parts(_job_or_404(job_id), _json_body(request), cancelled=_client_gone(request))
 
     # ------------------------------------------------------------------ palettes
 
@@ -511,9 +629,11 @@ def create_app(warmup: bool = False) -> FastAPI:
         strategy = body.get("strategy") or "balanced"
         if strategy not in STRATEGIES:
             raise ApiError(400, "bad_strategy", f"strategy must be one of {list(STRATEGIES)}")
-        keep_background = bool(body.get("keep_background", True))
+        # Background groups are left alone while the job ignores its background (they are
+        # locked then anyway); with the setting off they are suggested like any other group.
+        keep_background = bool(body.get("keep_background", pipeline.ignores_background(job)))
         keep_locked = bool(body.get("keep_locked", True))
-        m = suggest_mapping(job.groups(), hexes, strategy=strategy, keep_background=keep_background,
+        m = suggest_mapping(pipeline.effective_groups(job), hexes, strategy=strategy, keep_background=keep_background,
                             keep_locked=keep_locked)
         return {"mapping": mapping_to_json(m), "strategy": strategy}
 
@@ -555,8 +675,9 @@ def create_app(warmup: bool = False) -> FastAPI:
         body = _json_body(request)
         fields = pipeline.validate_state(job, body)
         if not fields:
-            raise ApiError(400, "nothing_to_save", "send at least one of mapping, render_options, palette_id")
-        job.update(**fields)
+            raise ApiError(400, "nothing_to_save", "send at least one of mapping, render_options, palette_id, "
+                                                   "ignore_background")
+        pipeline.save_state(job, fields)
         return job.snapshot()
 
     # ------------------------------------------------------------------ static web/

@@ -27,6 +27,9 @@ from . import config, imageio
 from .types import STAGES, AnalysisOptions, ColorGroup, ImageInfo, StageState
 
 STATUSES = ("queued", "analyzing", "ready", "error")
+#: Width of the `thumb` a JobSummary points at (a cached JPEG of the preview, ~40 KB instead
+#: of the 230 KB preview: a gallery of fifty jobs loaded 7 MB of previews at once).
+THUMB_W = 512
 STAGE_STATES = ("idle", "running", "done", "error", "skipped")
 
 # Subscriber queues are bounded so a stalled client can never make a publisher block;
@@ -67,6 +70,8 @@ class Job:
       savers (API handlers racing the worker) never trip over each other's temp file.
     - Once `deleted` is set (by `JobRegistry.delete`) nothing is written to disk any
       more, so a worker still running a stage cannot resurrect the job directory.
+    - `edit_lock` is held by `pipeline.apply_group_edit` for a whole edit, so edits of one
+      job run one after the other and none is lost.
     """
 
     def __init__(self, id: str, dir: str, meta: dict[str, Any]):
@@ -74,6 +79,12 @@ class Job:
         self.dir = dir
         self.meta = meta
         self.lock = threading.RLock()
+        # Serialises the group edits of this job (`pipeline.apply_group_edit`), which read
+        # the grouping, work on it for up to a few hundred ms and write it back: two
+        # concurrent edits lost one of them. Separate from `lock`, which guards `meta` for
+        # moments only, and from the pipeline's GPU lock, so a lock toggle never waits for
+        # an analysis stage of another job.
+        self.edit_lock = threading.RLock()
         self._subscribers: list[queue.Queue] = []
         self._stage_started: dict[str, float] = {}
         self._last_tick: dict[str, tuple[float, float]] = {}
@@ -104,6 +115,7 @@ class Job:
             "palette_id": None,
             "mapping": {},
             "render_options": {},
+            "ignore_background": True,
         }
 
     @classmethod
@@ -119,6 +131,12 @@ class Job:
             meta.setdefault(k, v)
         for s in STAGES:
             meta["stages"].setdefault(s, StageState().to_dict())
+        try:
+            # through the record type: defaults for fields added later, and a finish badge
+            # from before the glint rule is dropped (ColorGroup.from_dict)
+            meta["groups"] = [ColorGroup.from_dict(g).to_dict() for g in meta.get("groups") or []]
+        except (KeyError, TypeError, ValueError) as e:
+            raise ValueError(f"{dir}: bad group record: {e}") from None
         return cls(meta["id"], dir, meta)
 
     # ------------------------------------------------------------------ paths / io
@@ -166,7 +184,7 @@ class Job:
                 "name": m["name"],
                 "created": m["created"],
                 "status": m["status"],
-                "thumb": f"/api/jobs/{m['id']}/layers/preview",
+                "thumb": f"/api/jobs/{m['id']}/layers/preview?w={THUMB_W}",
                 "width": m["image"]["width"],
                 "height": m["image"]["height"],
                 "n_groups": len(m.get("groups") or []),

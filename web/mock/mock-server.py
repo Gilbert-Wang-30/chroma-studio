@@ -886,6 +886,37 @@ class Handler(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length") or 0)
         return self.rfile.read(n) if n else b""
 
+    def _mock_segment(self, job, b: dict) -> dict:
+        import base64
+        a = job.analysis
+        with job.lock:
+            region = a.sp_region[a.sp_labels]
+        h, w = region.shape
+        pts = [p for p in (b.get("points") or []) if isinstance(p, list) and len(p) >= 2]
+        if not pts and not b.get("box"):
+            return {"warm": True, "embed": "cached", "size": [w, h], "ms": 1.0}
+        at = lambda p: int(region[min(h - 1, max(0, int(p[1]))), min(w - 1, max(0, int(p[0])))])
+        pos = {at(p) for p in pts if (p[2] if len(p) > 2 else 1)}
+        neg = {at(p) for p in pts if len(p) > 2 and not p[2]}
+        if b.get("box"):
+            x0, y0, x1, y1 = (int(v) for v in b["box"])
+            ids, cnt = np.unique(region[y0:y1, x0:x1], return_counts=True)
+            area = np.bincount(region.ravel())
+            pos |= {int(i) for i, c in zip(ids, cnt) if c >= 0.7 * area[i]}
+        m = np.isin(region, sorted(pos - neg))
+        ys, xs = np.nonzero(m)
+        if not ys.size:
+            entry = {"png": None, "bbox": None, "area": 0}
+        else:
+            bx = [int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1]
+            buf = io.BytesIO()
+            Image.fromarray(m[bx[1]:bx[3], bx[0]:bx[2]].astype(np.uint8) * 255).convert("1").save(buf, format="PNG")
+            entry = {"png": "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode(), "bbox": bx,
+                     "area": int(ys.size)}
+        entry.update(score=0.9, index=0, refined=False, area_frac=round(entry["area"] / float(h * w), 6))
+        return {"mask": entry, "alternatives": [], "pick": 0, "crop": None, "steps": max(1, len(pts)),
+                "size": [w, h], "timings": {}, "embed": "cached", "ms": 1.0}
+
     def _json_body(self) -> dict:
         raw = self._body()
         if not raw:
@@ -1041,6 +1072,19 @@ class Handler(BaseHTTPRequestHandler):
                     job.mapping = {}
                 self._json(job.to_dict())
                 return
+            if sub == ["segment"] and method == "POST":
+                # Select part without a GPU: the mock regions under the positive points (or mostly
+                # inside the box), less those under the negative points
+                b = self._json_body()
+                self._require_ready(job)
+                self._json(self._mock_segment(job, b))
+                return
+            if sub == ["find"] and method == "POST":
+                self._require_ready(job)
+                text = str(self._json_body().get("text") or "")
+                self._json({"text": text, "phrases": [text], "detector": None, "candidates": [],
+                            "detect_ms": 0.0, "ms": 1.0})
+                return
             if sub == ["mapping", "suggest"] and method == "POST":
                 b = self._json_body()
                 self._require_ready(job)
@@ -1189,6 +1233,9 @@ class Handler(BaseHTTPRequestHandler):
             elif method == "PATCH" and len(sub) == 1:
                 an.patch(int(sub[0]), b)
                 self._json(job.to_dict())
+                return
+            elif method == "POST" and sub == ["from_mask"]:
+                self._error(501, "not_in_mock", "Making a part from a selection needs the real server (SAM 2)")
                 return
             else:
                 raise KeyError("/".join(sub))

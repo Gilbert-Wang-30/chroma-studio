@@ -7,6 +7,7 @@ import { h, icon, kbd, tip, replace } from './dom.js';
 import { enter } from './motion.js';
 import { prefs } from './state.js';
 import { toast } from './toast.js';
+import { initTooltips } from './tooltip.js';
 import { isTypingTarget } from './util.js';
 import { homeView } from './views/home.js';
 import { studioView } from './views/studio.js';
@@ -34,13 +35,14 @@ const themeBtn = tip(h('button.btn-icon.header-btn', { type: 'button', aria: { l
 function paintThemeBtn() { themeBtn.replaceChildren(icon(currentTheme() === 'light' ? 'moon' : 'sun')); }
 paintThemeBtn();
 
-const keysBtn = tip(h('button.btn-icon.header-btn', { type: 'button', aria: { label: 'Keyboard shortcuts' }, onClick: () => openShortcuts() }, icon('keyboard')), 'Shortcuts (?)');
+const keysBtn = tip(h('button.btn-icon.header-btn', { type: 'button', aria: { label: 'Keyboard shortcuts' }, onClick: () => openShortcuts() }, icon('keyboard')), 'Shortcuts (?)', 'left');
 const gpuChip = h('a.gpu-chip', { href: '#/how', aria: { label: 'Server status' } }, h('span.gpu-dot'), h('span.gpu-text', 'Connecting…'));
 const studioLink = h('a.nav-link', { href: '#/', dataset: { route: 'studio' }, hidden: true }, 'Studio');
 const nav = h('nav.header-nav', { aria: { label: 'Primary' } },
   studioLink,
   h('a.nav-link', { href: '#/gallery', dataset: { route: 'gallery' } }, 'Gallery'),
-  h('a.nav-link', { href: '#/how', dataset: { route: 'how' } }, 'How it works'));
+  // "it works" folds away on a phone, so the header never scrolls sideways
+  h('a.nav-link', { href: '#/how', dataset: { route: 'how' }, aria: { label: 'How it works' } }, 'How', h('span.nav-long', ' it works')));
 const header = h('header.app-header',
   h('a.wordmark', { href: '#/', aria: { label: 'Chroma Studio home' } },
     h('span.wordmark-glyph', { aria: { hidden: true } }, h('i'), h('i'), h('i')),
@@ -50,6 +52,7 @@ const header = h('header.app-header',
 
 const main = h('main.app-main', { id: 'view' });
 document.body.prepend(header, main);
+initTooltips();
 
 // ------------------------------------------------------------------ health chip
 
@@ -84,6 +87,9 @@ const SHORTCUTS = [
   ['M', 'Merge the selected colours into one'],
   ['A', 'Select every colour'],
   ['⇧ Click', 'Add a region to a multi-selection'],
+  ['S', 'Select part: click a part and SAM 2 cuts it out as a group of its own'],
+  ['⌥ / Alt Click', 'Start Select part at that click'],
+  ['Enter  /  ⌫  /  N', 'In Select part: make the group / undo a point / SAM 2’s next shape'],
   ['⌘Z  /  ⇧⌘Z', 'Undo / redo a mapping change'],
   ['Esc', 'Clear the selection'],
   ['?', 'This sheet'],

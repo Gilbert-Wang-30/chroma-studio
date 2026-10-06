@@ -176,6 +176,7 @@ kbd {
   border-radius: 8px;
   color: var(--text-2);
   font-weight: 500;
+  white-space: nowrap;
   transition: background var(--dur-fast), color var(--dur-fast);
 }
 .nav-link:hover { background: var(--bg-3); color: var(--text-1); }
@@ -206,7 +207,9 @@ kbd {
    Main + generic layout
    -------------------------------------------------------------------------- */
 
-.app-main { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+/* (clip, not hidden: no scroll container, so nothing sticky inside changes; the home page's
+   720 px hero glow made a 390 px phone scroll sideways to 555 px) */
+.app-main { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-x: clip; }
 body[data-route='studio'] .app-main { height: calc(100vh - var(--header-h)); }
 
 .home, .gallery, .how {
@@ -215,8 +218,9 @@ body[data-route='studio'] .app-main { height: calc(100vh - var(--header-h)); }
   margin: 0 auto;
   padding: 32px 24px 80px;
 }
-.section-head { display: flex; align-items: baseline; gap: 14px; margin-bottom: 14px; }
+.section-head { display: flex; align-items: baseline; gap: 14px; margin-bottom: 14px; flex-wrap: wrap; }
 .section-hint { color: var(--text-3); font-size: 13px; }
+.section-tools { display: inline-flex; align-items: center; gap: 8px; align-self: center; }
 .page-head { align-items: center; margin-bottom: 24px; }
 .page-head h1 { font-size: 26px; }
 .page-lede { color: var(--text-2); max-width: 640px; font-size: 15px; }
@@ -302,7 +306,7 @@ body[data-route='studio'] .app-main { height: calc(100vh - var(--header-h)); }
   flex: none;
 }
 .btn-icon:hover { background: var(--bg-3); color: var(--text-1); }
-.btn-icon:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-icon:disabled, .btn-icon[aria-disabled='true'] { opacity: 0.4; cursor: not-allowed; }
 .btn-icon.is-active, .btn-icon[aria-pressed='true'] { color: var(--accent); background: var(--accent-soft); }
 .btn-icon.is-flipped .icon { transform: scaleX(-1); }
 .link-btn { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; font-weight: 500; }
@@ -367,6 +371,8 @@ body[data-route='studio'] .app-main { height: calc(100vh - var(--header-h)); }
   background: var(--bg-3);
   color: var(--text-2);
   font-size: 11.5px;
+  white-space: nowrap;
+  flex: none;
 }
 .chip-row { display: flex; flex-wrap: wrap; gap: 6px; }
 .chip-row .chip, button.chip {
@@ -395,9 +401,9 @@ button.chip:hover { background: var(--accent-soft); border-color: var(--accent-r
   cursor: default;
 }
 .badge-bg { background: var(--warn-soft); color: var(--warn); }
-button.badge-bg { cursor: pointer; }
-button.badge-bg:hover { filter: brightness(1.15); }
 .badge-lock { background: var(--bg-4); color: var(--text-2); }
+.badge-finish { background: var(--accent-soft); color: var(--accent); }
+.badge-icon { width: 18px; padding: 0; justify-content: center; }
 
 .status-chip {
   display: inline-flex;
@@ -461,36 +467,40 @@ button.badge-bg:hover { filter: brightness(1.15); }
 .switch input:checked + .switch-knob::after { transform: translateX(16px); }
 .switch input:focus-visible + .switch-knob { box-shadow: 0 0 0 3px var(--accent-soft); }
 
-/* Tooltips (data-tip) */
-[data-tip] { position: relative; }
-[data-tip]::after {
-  content: attr(data-tip);
-  position: absolute;
-  left: 50%;
-  bottom: calc(100% + 8px);
-  transform: translate(-50%, 4px);
+/* Tooltips (data-tip): one floating element that js/tooltip.js places next to the hovered
+   or focused element, in <body>, so the inspector's scrolling panels never clip it; long
+   texts wrap. */
+.tooltip {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 200;
+  width: max-content;
+  max-width: min(260px, calc(100vw - 16px));
   padding: 5px 9px;
   border-radius: 7px;
   background: var(--bg-4);
   color: var(--text-1);
+  font-family: var(--font-ui);
   font-size: 11.5px;
   font-weight: 500;
-  font-family: var(--font-ui);
-  white-space: nowrap;
-  box-shadow: var(--shadow-1);
-  border: 1px solid var(--line);
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity var(--dur-fast), transform var(--dur-fast) var(--ease);
-  z-index: 60;
+  line-height: 1.4;
   text-transform: none;
   letter-spacing: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  box-shadow: var(--shadow-1);
+  border: 1px solid var(--line);
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(3px);
+  transition: opacity var(--dur-fast), transform var(--dur-fast) var(--ease);
 }
-[data-tip]:hover::after, [data-tip]:focus-visible::after { opacity: 1; transform: translate(-50%, 0); transition-delay: 350ms; }
-[data-tip-pos='left']::after { left: auto; right: calc(100% + 8px); bottom: auto; top: 50%; transform: translate(4px, -50%); }
-[data-tip-pos='left']:hover::after { transform: translate(0, -50%); }
-[data-tip-pos='bottom']::after { bottom: auto; top: calc(100% + 8px); transform: translate(-50%, -4px); }
-[data-tip-pos='bottom']:hover::after { transform: translate(-50%, 0); }
+.tooltip[data-side='bottom'] { transform: translateY(-3px); }
+.tooltip[data-side='left'] { transform: translateX(3px); }
+.tooltip[data-side='right'] { transform: translateX(-3px); }
+.tooltip.is-visible { opacity: 1; transform: none; }
+.tooltip[hidden] { display: none; }
 
 /* Skeletons */
 .skeleton {
@@ -517,6 +527,12 @@ button.badge-bg:hover { filter: brightness(1.15); }
    -------------------------------------------------------------------------- */
 
 .toasts { position: fixed; right: 20px; bottom: 20px; display: flex; flex-direction: column; gap: 8px; z-index: 80; pointer-events: none; }
+/* In the studio the toasts sit over the canvas's corner, clear of the inspector: at the bottom
+   right they covered the export result (file name and Download) the toast was announcing. */
+body[data-route='studio'] .toasts { right: calc(var(--inspector-w) + 20px); }
+/* ... and above the selection pill while one shows (status bar 34 + 16 + the pill): at 1024 px the
+   toast after Make group covered the new group's paint, lock and split buttons. */
+body[data-route='studio']:has(.select-pill:not([hidden])) .toasts { bottom: calc(34px + 16px + 54px + 14px); }
 .toast {
   pointer-events: auto;
   display: flex;
@@ -646,12 +662,19 @@ button.badge-bg:hover { filter: brightness(1.15); }
 .gallery-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
 .job-card { position: relative; display: flex; flex-direction: column; border-radius: var(--radius-3); border: 1px solid var(--line); background: var(--bg-1); overflow: hidden; transition: border-color var(--dur), transform var(--dur) var(--ease), box-shadow var(--dur); }
 .job-card:hover { border-color: var(--line-strong); transform: translateY(-3px); box-shadow: var(--shadow-1); }
-.job-thumb { position: relative; display: block; aspect-ratio: 4 / 2.6; background: var(--bg-3); }
-.job-thumb img { width: 100%; height: 100%; object-fit: cover; }
-.job-thumb .status-chip { position: absolute; left: 10px; top: 10px; backdrop-filter: blur(6px); }
+/* The thumb keeps the card's aspect whatever the photo's (a square preview made its card
+   88 px taller than its neighbours): the image is taken out of flow and cropped. */
+.job-thumb { position: relative; display: block; aspect-ratio: 4 / 2.6; background: var(--bg-3); overflow: hidden; }
+.job-thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.job-thumb .status-chip { position: absolute; left: 10px; top: 10px; gap: 6px; backdrop-filter: blur(6px); background: rgba(10, 12, 16, 0.66); color: #fff; }
+.job-thumb .status-chip::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--text-3); }
+.job-thumb .status-chip.status-ready::before { background: var(--ok); }
+.job-thumb .status-chip.status-analyzing::before, .job-thumb .status-chip.status-queued::before { background: var(--warn); }
+.job-thumb .status-chip.status-error::before { background: var(--err); }
 .job-body { padding: 12px 14px 14px; display: flex; flex-direction: column; gap: 6px; }
 .job-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .job-meta { display: flex; gap: 10px; color: var(--text-3); font-size: 12px; flex-wrap: wrap; }
+.job-time { color: var(--text-3); font-size: 12px; }
 .card-delete { position: absolute; right: 8px; top: 8px; background: rgba(11, 13, 18, 0.6); color: #fff; opacity: 0; transition: opacity var(--dur-fast); backdrop-filter: blur(6px); }
 .job-card:hover .card-delete, .job-card:focus-within .card-delete { opacity: 1; }
 .card-delete:hover { background: var(--err); color: #fff; }
@@ -687,7 +710,8 @@ button.badge-bg:hover { filter: brightness(1.15); }
 
 .studio { display: grid; grid-template-columns: minmax(0, 1fr) var(--inspector-w); height: 100%; min-height: 0; }
 .studio-viewer { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--viewer-bg); }
-.studio-inspector { overflow-y: auto; overscroll-behavior: contain; border-left: 1px solid var(--line); background: var(--bg-1); padding: 12px 12px 40px; display: flex; flex-direction: column; gap: 10px; scrollbar-width: thin; }
+.studio-inspector { overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; border-left: 1px solid var(--line); background: var(--bg-1); padding: 12px 12px 40px; display: flex; flex-direction: column; gap: 10px; scrollbar-width: thin; min-width: 0; }
+.studio-inspector > * { min-width: 0; }
 
 .viewer-toolbar { height: 48px; flex: none; display: flex; align-items: center; gap: 12px; padding: 0 12px; border-bottom: 1px solid var(--line); background: var(--bg-1); }
 .toolbar-left { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1; }
@@ -718,11 +742,15 @@ button.badge-bg:hover { filter: brightness(1.15); }
 .render-bar { position: absolute; left: 0; top: 0; height: 2px; width: 100%; overflow: hidden; z-index: 5; background: var(--accent-soft); }
 .render-bar::after { content: ''; position: absolute; top: 0; bottom: 0; width: 38%; background: var(--accent); border-radius: 2px; animation: indeterminate 1s var(--ease) infinite; }
 
-.viewer-status { height: 34px; flex: none; display: flex; align-items: center; gap: 12px; padding: 0 14px; border-top: 1px solid var(--line); background: var(--bg-1); color: var(--text-3); font-size: 12px; }
-.status-hover { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.viewer-status { height: 34px; flex: none; display: flex; align-items: center; gap: 12px; padding: 0 14px; border-top: 1px solid var(--line); background: var(--bg-1); color: var(--text-3); font-size: 12px; min-width: 0; }
+/* The hint takes the room that is left and ends in an ellipsis; the timing chips on the right keep
+   their size and never wrap (at 1024 px the long hint squeezed "10 ms" onto two lines, cut off). */
+.status-hover { display: flex; align-items: center; gap: 8px; flex: 1 1 auto; min-width: 0; overflow: hidden; }
+.status-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .status-hover.has-region { color: var(--text-1); }
 .status-dot { width: 10px; height: 10px; border-radius: 3px; border: 1px solid rgba(255, 255, 255, 0.2); flex: none; }
 .status-sep { color: var(--text-3); }
+.status-render, .status-seg { flex: none; white-space: nowrap; }
 .status-render { display: inline-flex; align-items: center; gap: 4px; color: var(--text-2); transition: opacity var(--dur-fast); }
 .status-render.is-busy { opacity: 0.5; }
 
@@ -771,7 +799,6 @@ button.badge-bg:hover { filter: brightness(1.15); }
 .pill-title { font-weight: 600; font-size: 13.5px; }
 .pill-sub { color: var(--text-3); font-size: 11.5px; }
 .pill-actions { display: flex; gap: 2px; padding-left: 4px; border-left: 1px solid var(--line-strong); }
-.select-pill [data-tip]::after { bottom: calc(100% + 12px); }
 
 /* --------------------------------------------------------------------------
    Panels
@@ -793,7 +820,7 @@ button.badge-bg:hover { filter: brightness(1.15); }
 .panel-body { padding: 4px 12px 12px; display: flex; flex-direction: column; gap: 10px; }
 .panel-h { margin-top: 8px; }
 .panel-h:first-child { margin-top: 0; }
-.panel-footer { display: flex; align-items: center; gap: 6px; padding-top: 4px; }
+.panel-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding-top: 4px; }
 .panel-hint { font-size: 12px; color: var(--text-3); line-height: 1.5; margin: 8px 0 0; }
 .panel-hint kbd { font-size: 10.5px; padding: 1px 5px; }
 .merge-count { display: inline-flex; align-items: center; justify-content: center; min-width: 16px; height: 16px; padding: 0 4px; margin-left: 2px; border-radius: 8px; background: rgba(255, 255, 255, 0.22); font-size: 10.5px; font-weight: 600; }
@@ -829,6 +856,7 @@ button.badge-bg:hover { filter: brightness(1.15); }
 .step-msg { font-size: 12px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-height: 18px; }
 .step[data-state='running'] .step-msg { color: var(--text-2); }
 .step[data-state='error'] .step-msg { color: var(--err); white-space: normal; }
+.step[data-state='done'] .step-msg { white-space: normal; text-wrap: pretty; }
 .step-bar { height: 4px; border-radius: 2px; background: var(--bg-4); overflow: hidden; }
 .step-bar-fill { height: 100%; width: 0; border-radius: 2px; background: var(--accent); transition: width 500ms var(--ease), background var(--dur); }
 .step[data-state='done'] .step-bar-fill { background: var(--ok); }
@@ -844,10 +872,11 @@ button.badge-bg:hover { filter: brightness(1.15); }
 /* Groups */
 /* The list scrolls inside the panel so Merge / Split / Auto-regroup stay in view
    even on a photo that yields thirty colour groups. */
-.group-list { display: flex; flex-direction: column; gap: 4px; max-height: min(44vh, 400px); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; padding: 2px 4px 2px 2px; margin: -2px -4px -2px -2px; }
+.group-list { display: flex; flex-direction: column; gap: 4px; max-height: min(44vh, 400px); overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; scrollbar-width: thin; padding: 2px 4px 2px 2px; margin: -2px -4px -2px -2px; min-width: 0; }
 .group-row {
   display: grid;
-  grid-template-columns: 16px 30px 1fr 30px;
+  grid-template-columns: 16px 30px minmax(0, 1fr) auto;
+  min-width: 0;
   align-items: center;
   gap: 8px;
   padding: 7px 6px 7px 4px;
@@ -868,24 +897,142 @@ button.badge-bg:hover { filter: brightness(1.15); }
 .group-row:hover .group-drag { opacity: 1; }
 .group-swatch { width: 30px; height: 30px; border-radius: 9px; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14); }
 .group-main { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
-.group-title { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.group-name { font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.group-edit { width: 20px; height: 20px; opacity: 0; }
+/* The title wraps: the name keeps its width (ellipsis only when it alone is wider than the
+   row) and the badges take a second line when they do not fit beside it. */
+.group-title { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; min-width: 0; }
+.group-name { flex: 0 1 auto; min-width: 0; max-width: 100%; font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.group-title .badge { flex: 0 0 auto; }
+.group-edit { width: 20px; height: 20px; opacity: 0; flex: 0 0 auto; }
 .group-row:hover .group-edit, .group-row:focus-within .group-edit { opacity: 1; }
 .group-rename { height: 22px; padding: 0 6px; border-radius: 6px; border: 1px solid var(--accent); background: var(--bg-0); color: var(--text-1); font: inherit; font-size: 13px; font-weight: 600; width: 140px; }
 .group-rename:focus { outline: none; box-shadow: 0 0 0 3px var(--accent-soft); }
-.group-meta { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--text-3); }
-.group-bar { flex: 1; max-width: 120px; height: 4px; border-radius: 2px; background: var(--bg-4); overflow: hidden; }
+.group-meta { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--text-3); min-width: 0; white-space: nowrap; }
+.group-bar { flex: 1 1 40px; min-width: 24px; max-width: 120px; height: 4px; border-radius: 2px; background: var(--bg-4); overflow: hidden; }
 .group-bar-fill { display: block; height: 100%; border-radius: 2px; background: var(--text-3); transition: width 400ms var(--ease); }
 .group-row.is-selected .group-bar-fill { background: var(--accent); }
 .group-pct { color: var(--text-2); min-width: 36px; }
-.group-lock { opacity: 0.55; }
-.group-row:hover .group-lock, .group-row.is-locked .group-lock { opacity: 1; }
+.group-actions { display: inline-flex; align-items: center; gap: 2px; }
+.group-lock, .group-bg { opacity: 0.55; }
+.group-row:hover .group-lock, .group-row.is-locked .group-lock, .group-row:hover .group-bg, .group-bg[aria-pressed='true'] { opacity: 1; }
 .group-row.is-locked .group-lock { color: var(--warn); }
+.group-bg[aria-pressed='true'] { color: var(--warn); background: transparent; }
+.group-lock[aria-disabled='true'] { cursor: default; }
 .group-row.is-locked .group-swatch { position: relative; }
+.group-row.is-ignored { opacity: 0.55; }
+.group-row.is-ignored:hover, .group-row.is-ignored.is-selected { opacity: 0.85; }
+.group-row.is-ignored .group-swatch { filter: saturate(0.6); }
+/* Sections of the list: Parts, Colours, Minor (collapsed), Background (collapsed while ignored) */
+.group-section-head { list-style: none; padding: 6px 0 2px; }
+.group-section-head:first-child { padding-top: 0; }
+.group-section-toggle { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; height: 26px; padding: 0 8px 0 6px; border: 0; border-radius: 8px; background: transparent; color: var(--text-3); font: inherit; text-align: left; }
+button.group-section-toggle { cursor: pointer; transition: background var(--dur-fast), color var(--dur-fast); }
+button.group-section-toggle:hover { background: var(--bg-3); color: var(--text-2); }
+.group-section-title { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; }
+.group-section-count { font-size: 10.5px; letter-spacing: 0; padding: 1px 6px; border-radius: 999px; background: var(--bg-4); color: var(--text-2); }
+.group-section-chevron { transition: transform var(--dur) var(--ease); }
+.group-section-head.is-collapsed .group-section-chevron { transform: rotate(-90deg); }
+.group-section-head[data-section='parts'] .group-section-title { color: var(--ok); }
+.badge-part { background: var(--ok-soft); color: var(--ok); }
+/* In a narrow inspector the Part badge keeps its icon only (its label stays the aria-label),
+   so a part's name and its finish badge share one line. */
+.group-list { container-type: inline-size; }
+@container (max-width: 300px) {
+  .badge-part .badge-text { display: none; }
+  .badge-part { width: 18px; padding: 0; justify-content: center; }
+}
+.group-row.is-part .group-swatch { box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14), 0 0 0 2px var(--ok-soft); }
+.group-row.is-minor { padding-top: 5px; padding-bottom: 5px; }
+.group-row.is-minor .group-swatch { width: 24px; height: 24px; border-radius: 7px; justify-self: center; }
+.group-merge-parent { opacity: 0.55; }
+.group-row:hover .group-merge-parent { opacity: 1; }
+.ignore-row { padding: 2px 4px 6px; border-bottom: 1px solid var(--line); margin-bottom: 2px; color: var(--text-1); }
+.ignore-label { display: inline-flex; align-items: baseline; gap: 8px; }
+.ignore-count { font-size: 11px; color: var(--text-3); }
 .regroup-form { display: flex; flex-direction: column; gap: 8px; padding: 10px 10px 12px; border-radius: 10px; background: var(--bg-3); animation: rise var(--dur) var(--ease); }
 .regroup-form .btn { align-self: flex-end; }
 .regroup-form .range-row { grid-template-columns: 60px 1fr 44px; }
+
+/* Select part (the viewer tool) and Find part (the Groups panel's search row) */
+.viewer-stage.is-tool { cursor: crosshair; }
+.viewer-stage.has-candidate { cursor: pointer; }
+.spinner-sm { width: 14px; height: 14px; border-width: 2px; }
+.status-seg { display: inline-flex; align-items: center; gap: 4px; color: var(--ok); }
+.pill-seg { display: grid; place-items: center; background: var(--ok-soft); color: var(--ok); box-shadow: inset 0 0 0 1px rgba(61, 220, 151, 0.35); }
+.pill-seg-icon { display: grid; place-items: center; }
+.select-pill .pill-text .pill-sub { overflow: hidden; text-overflow: ellipsis; }
+.pill-seg-ring { position: absolute; inset: -3px; border-radius: 50%; border: 2px solid transparent; opacity: 0; pointer-events: none; }
+.pill-seg.is-busy .pill-seg-ring { border-top-color: var(--ok); border-right-color: var(--ok-soft); animation: spin 0.8s linear infinite, fade-in 160ms linear 140ms forwards; }
+.pill-name {
+  height: 30px;
+  width: 148px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line-strong);
+  background: var(--bg-0);
+  color: var(--text-1);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  min-width: 0;
+  transition: border-color var(--dur-fast), box-shadow var(--dur-fast);
+}
+:root[data-theme='light'] .pill-name { background: var(--bg-1); }
+.pill-name::placeholder { color: var(--text-3); }
+.pill-name:focus { outline: none; border-color: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
+.seg-make kbd { margin-left: 2px; padding: 2px 4px; font-size: 10px; background: rgba(255, 255, 255, 0.18); border-color: rgba(255, 255, 255, 0.25); color: inherit; box-shadow: none; }
+.find-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; align-items: center; }
+.find-field { position: relative; display: block; min-width: 0; }
+.find-field > .icon { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--text-3); pointer-events: none; }
+.find-input { width: 100%; height: 32px; padding-left: 31px; font-size: 13px; }
+.find-input::-webkit-search-cancel-button { filter: grayscale(1); opacity: 0.6; }
+.find-results { display: flex; flex-direction: column; gap: 8px; padding: 8px 10px; border-radius: 10px; background: var(--bg-3); animation: rise var(--dur) var(--ease); }
+.find-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 10px; font-size: 12px; color: var(--text-2); }
+.find-note { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+.find-head .link-btn { font-size: 12px; }
+.find-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.find-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px 0 4px;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  background: var(--bg-2);
+  color: var(--text-1);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background var(--dur-fast), border-color var(--dur-fast), transform var(--dur-fast);
+}
+.find-chip:hover, .find-chip.is-hovered { border-color: var(--warn); background: var(--warn-soft); }
+.find-chip:active { transform: translateY(1px); }
+.find-chip:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--warn-soft); border-color: var(--warn); }
+.find-num { width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; background: var(--warn); color: #1a1206; font-weight: 700; font-size: 11px; }
+.find-score { color: var(--text-3); font-size: 11px; }
+.find-known { display: inline-flex; align-items: center; gap: 3px; color: var(--ok); font-size: 11px; font-weight: 600; max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* a new outline over a group of what was asked for, and one that is mostly a part of another kind */
+.find-known.is-overlap { color: var(--text-2); font-weight: 500; }
+.find-known.is-other { color: var(--text-3); font-weight: 500; }
+.find-known.is-other .icon { color: var(--warn); }
+.find-chip.is-other .find-size { color: var(--text-3); }
+/* Select part's "Take all": the part group the outline covers most of joins it whole */
+.seg-take { gap: 4px; padding: 0 9px 0 7px; }
+.seg-take[aria-pressed='true'] { background: var(--ok-soft); border-color: rgba(61, 220, 151, 0.45); color: var(--ok); }
+.group-remove { opacity: 0.55; }
+.group-row:hover .group-remove { opacity: 1; }
+.group-remove:hover { color: var(--err); }
+@media (max-width: 600px) {
+  .pill-name { width: 96px; }
+  .seg-make kbd, .seg-make span { display: none; }
+  .seg-make { width: 30px; padding: 0; }
+  .seg-take span { display: none; }
+  .seg-take { width: 30px; padding: 0; justify-content: center; }
+  /* Select part on a phone: two rows, the part's name and facts above, the name field and the actions
+     below (in one row the name field shrank to four letters once Take all showed) */
+  .select-pill:has(.pill-seg) { flex-wrap: wrap; row-gap: 8px; width: calc(100% - 24px); max-width: none; border-radius: 18px; }
+  .select-pill:has(.pill-seg) .pill-text { flex: 1 1 calc(100% - 46px); }
+  .select-pill:has(.pill-seg) .pill-name { flex: 1 1 0; width: auto; min-width: 96px; }
+}
 
 /* Palette */
 .palette-form { display: grid; grid-template-columns: 1fr auto auto; gap: 6px; }
@@ -916,7 +1063,7 @@ button.badge-bg:hover { filter: brightness(1.15); }
 /* Mapping */
 .map-list { display: flex; flex-direction: column; gap: 4px; }
 .map-hint { padding: 0 2px; }
-.map-row { position: relative; display: grid; grid-template-columns: 26px 1fr 18px auto 24px; align-items: center; gap: 8px; padding: 6px 6px; border-radius: 10px; border: 1px solid transparent; transition: background var(--dur-fast), border-color var(--dur-fast), transform var(--dur-fast); cursor: default; }
+.map-row { position: relative; display: grid; grid-template-columns: 26px minmax(0, 1fr) 18px auto 24px; align-items: center; gap: 8px; padding: 6px 6px; border-radius: 10px; border: 1px solid transparent; transition: background var(--dur-fast), border-color var(--dur-fast), transform var(--dur-fast); cursor: default; }
 .map-row:hover { background: var(--bg-3); }
 .map-row.is-selected { border-color: var(--accent-ring); }
 .map-row.is-drop-target { background: var(--accent-soft); border-color: var(--accent); transform: scale(1.01); }
@@ -924,12 +1071,12 @@ button.badge-bg:hover { filter: brightness(1.15); }
 .map-source { width: 26px; height: 26px; border-radius: 8px; background: var(--swatch); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14); }
 .map-main { min-width: 0; display: flex; flex-direction: column; }
 .map-title { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.map-name { flex: 1 1 auto; min-width: 4ch; font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.map-name { flex: 1 1 auto; min-width: 6ch; font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .map-flags { display: inline-flex; gap: 4px; flex: 0 0 auto; }
 .map-sub { color: var(--text-3); font-size: 11px; }
 .map-arrow { color: var(--text-3); display: inline-flex; }
 .map-row.is-mapped .map-arrow { color: var(--accent); }
-.map-target { position: relative; display: inline-flex; align-items: center; gap: 8px; height: 32px; padding: 0 10px 0 4px; border-radius: 9px; border: 1px dashed var(--line-strong); background: transparent; color: var(--text-3); cursor: pointer; font-size: 12px; transition: border-color var(--dur-fast), background var(--dur-fast); min-width: 112px; }
+.map-target { position: relative; display: inline-flex; align-items: center; gap: 8px; height: 32px; padding: 0 10px 0 4px; border-radius: 9px; border: 1px dashed var(--line-strong); background: transparent; color: var(--text-3); cursor: pointer; font-size: 12px; transition: border-color var(--dur-fast), background var(--dur-fast); min-width: 104px; white-space: nowrap; }
 .map-target:hover { border-color: var(--accent); color: var(--text-1); }
 .map-target:disabled { cursor: not-allowed; }
 .map-row.is-mapped .map-target { border-style: solid; background: var(--bg-2); color: var(--text-1); }
@@ -940,12 +1087,23 @@ button.badge-bg:hover { filter: brightness(1.15); }
 /* Finish */
 .slider-stack { display: flex; flex-direction: column; gap: 4px; }
 .export-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.export-result { padding-top: 4px; }
+.export-result { padding-top: 4px; container-type: inline-size; }
 .export-file { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 10px; background: var(--bg-3); }
 .export-icon { width: 28px; height: 28px; border-radius: 50%; background: var(--ok-soft); color: var(--ok); display: grid; place-items: center; flex: none; }
 .export-info { min-width: 0; flex: 1; display: flex; flex-direction: column; }
 .export-name { font-weight: 500; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.export-meta { color: var(--text-3); font-size: 11px; }
+/* Size and time are two items that wrap onto a second line when the info column is
+   narrow (JetBrains Mono at 11 px needs 147 px for "3,840 x 2,555 · 1.2 s") instead of
+   being cut with an ellipsis. */
+.export-meta { display: flex; flex-wrap: wrap; column-gap: 8px; color: var(--text-3); font-size: 11px; line-height: 1.5; }
+.export-meta > span { white-space: nowrap; }
+.export-note { color: var(--text-3); font-size: 11px; line-height: 1.35; margin-top: 2px; white-space: normal; }
+/* In a narrow inspector (340 px and below) the Download button keeps its icon only; the
+   label is still its aria-label. */
+@container (max-width: 300px) {
+  .export-download .btn-label { display: none; }
+  .export-download { width: 30px; padding: 0; gap: 0; }
+}
 
 /* --------------------------------------------------------------------------
    Keyframes
@@ -975,6 +1133,10 @@ button.badge-bg:hover { filter: brightness(1.15); }
 @media (max-width: 900px) {
   body[data-route='studio'] { height: auto; overflow: auto; }
   body[data-route='studio'] .app-main { height: auto; }
+  /* the inspector runs under the canvas here: toasts go to the top, below the header */
+  body[data-route='studio'] .toasts,
+  body[data-route='studio']:has(.select-pill:not([hidden])) .toasts { right: 12px; left: 12px; bottom: auto; top: calc(var(--header-h) + 10px); align-items: flex-end; }
+  body[data-route='studio'] .toast { min-width: 0; max-width: min(400px, 100%); }
   .studio { grid-template-columns: 1fr; grid-template-rows: 70vh auto; height: auto; }
   .studio-inspector { border-left: 0; border-top: 1px solid var(--line); }
   .pipeline { grid-template-columns: repeat(2, 1fr); gap: 20px; }
@@ -982,6 +1144,27 @@ button.badge-bg:hover { filter: brightness(1.15); }
   .drop-preview { grid-template-columns: 1fr; }
   .header-nav { gap: 0; }
   .gpu-chip { display: none; }
+}
+/* A phone: the header's actions fold so the page never scrolls sideways (at 390 px the full
+   header measured 423-490 px). The wordmark keeps its glyph, "How it works" reads "How", and
+   the keyboard-shortcut button, of no use without a keyboard, goes. */
+@media (max-width: 600px) {
+  .app-header { gap: 10px; padding: 0 12px; }
+  .wordmark-text { display: none; }
+  .nav-link { padding: 6px 8px; }
+  .nav-long { display: none; }
+  .header-right .header-btn[aria-label='Keyboard shortcuts'] { display: none; }
+  /* The studio toolbar keeps one row (it measured 676 px): the layer tabs scroll inside it,
+     the photo's name and the zoom steps go (pinch zooms; Fit and Compare stay). */
+  .viewer-toolbar { gap: 8px; padding: 0 8px; }
+  .toolbar-left, .viewer-toolbar .toolbar-sep, .zoom-pct { display: none; }
+  .toolbar-right [aria-label='Zoom out'], .toolbar-right [aria-label='Zoom in'],
+  .toolbar-right [aria-label='Actual pixels'] { display: none; }
+  .toolbar-right { flex: none; }
+  .layer-tabs { flex: 0 1 auto; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+  .layer-tabs::-webkit-scrollbar { display: none; }
+  .layer-tab { flex: none; }
+  .home, .gallery, .how { padding: 24px 16px 64px; }
 }
 
 /* --------------------------------------------------------------------------

@@ -35,10 +35,15 @@ export function galleryView(root) {
   function card(j) {
     const del = tip(h('button.btn-icon.card-delete', { type: 'button', aria: { label: `Delete ${j.name}` }, onClick: (e) => { e.preventDefault(); e.stopPropagation(); askDelete(j, el); } }, icon('trash', { size: 15 })), 'Delete');
     const el = h('a.job-card', { href: `#/studio/${j.id}`, dataset: { key: j.id } },
-      h('span.job-thumb', h('img', { src: j.thumb, alt: '', loading: 'lazy', onError: (e) => e.currentTarget.remove() }), h(`span.status-chip.status-${j.status}`, j.status)),
+      // `thumb` is a 512 px JPEG of the preview (server-side cache), lazy and decoded off the
+      // main thread: fifty 1024 px previews at once ran the browser out of resources
+      h('span.job-thumb', h('img', { src: j.thumb, alt: '', loading: 'lazy', decoding: 'async', onError: (e) => e.currentTarget.remove() }), h(`span.status-chip.status-${j.status}`, j.status)),
       h('span.job-body',
         h('span.job-name', j.name),
-        h('span.job-meta', h('span.mono', formatDims(j.width, j.height)), h('span.mono', `${j.n_groups} groups`), h('span', relativeTime(j.created)))),
+        // the time on its own line: with it in the meta row, wide dimensions wrapped it and
+        // the cards of one row stood taller than the next
+        h('span.job-meta', h('span.mono', formatDims(j.width, j.height)), h('span.mono', `${j.n_groups} groups`)),
+        h('span.job-time', relativeTime(j.created))),
       del);
     return el;
   }

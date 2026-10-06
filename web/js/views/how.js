@@ -9,8 +9,8 @@ const STAGES = [
   { key: 'ingest', icon: 'image', title: 'Ingest', text: 'Your photo is read, oriented and resized into a working copy. The original stays untouched for the final export.' },
   { key: 'intrinsic', icon: 'shine', title: 'Separate paint from light', text: 'An intrinsic decomposition model splits every pixel into albedo (the paint colour), shading (how light falls on the surface) and a residual for reflections and glare.' },
   { key: 'segment', icon: 'scan', title: 'Find the parts', text: 'SAM 2 proposes masks for everything it can see — panels, trim, wheels, laces, background — at a density you choose with Fast, Balanced or Max.' },
-  { key: 'regions', icon: 'grid', title: 'Clean regions', text: 'Overlapping proposals are resolved, two-tone parts are split, gaps are filled with superpixels and specks are absorbed, so every pixel belongs to exactly one region.' },
-  { key: 'groups', icon: 'layers', title: 'Group by colour', text: 'Regions with the same paint are clustered into colour groups. Each group gets a name and a swatch, and that is what you recolor.' },
+  { key: 'regions', icon: 'grid', title: 'Clean regions', text: 'Overlapping proposals are resolved, two-tone parts are split, gaps are filled with superpixels and specks are absorbed, so every pixel belongs to exactly one region. The parts people personalise — a shock spring, the rims, a grille, the brake calipers seen through a wheel — are recognised and get regions of their own.' },
+  { key: 'groups', icon: 'layers', title: 'Group by colour', text: 'Regions with the same paint are clustered into colour groups, and every recognised part keeps a group of its own, named after it, whatever its colour. A sliver that is only a shadow of its neighbour, or the shadowed rim of a part, is folded back into it, and the paint showing through a letter goes back to the paint. Each group gets a name and a swatch, and that is what you recolor.' },
 ];
 
 export function howView(root) {

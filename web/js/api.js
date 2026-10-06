@@ -7,12 +7,14 @@
  */
 
 export class ApiError extends Error {
-  constructor(message, { status = 0, detail = '', cause = null } = {}) {
+  constructor(message, { status = 0, detail = '', cause = null, retryAfter = 0 } = {}) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.detail = detail;
     this.cause = cause;
+    /** Seconds the server asked to wait before trying again (a 503 while the GPU is busy), else 0. */
+    this.retryAfter = retryAfter;
   }
   /** Human sentence for a toast. */
   get userMessage() {
@@ -42,7 +44,7 @@ async function request(method, path, { json = null, form = null, signal = null, 
     let payload = null;
     try { payload = await res.json(); } catch { /* not JSON */ }
     throw new ApiError(payload?.error || `${res.status} ${res.statusText}`,
-      { status: res.status, detail: payload?.detail || '' });
+      { status: res.status, detail: payload?.detail || '', retryAfter: Number(res.headers.get('Retry-After')) || 0 });
   }
   if (raw) return res;
   if (res.status === 204) return null;
@@ -83,11 +85,24 @@ export const api = {
     return request('POST', '/api/jobs', { json });
   },
 
-  mergeGroups: (id, group_ids) => request('POST', `/api/jobs/${id}/groups/merge`, { json: { group_ids } }),
-  splitGroup: (id, group_id, k = 2) => request('POST', `/api/jobs/${id}/groups/split`, { json: { group_id, k } }),
+  /** Merge groups; `into` (one of them) keeps its name and a part drawn with Select part merged
+   *  into it joins it (`dissolve`: the drawn part is removed, its pixels join `into`). */
+  mergeGroups: (id, group_ids, into = null, { dissolve = false } = {}) => request('POST', `/api/jobs/${id}/groups/merge`,
+    { json: { group_ids, ...(into === null || into === undefined ? {} : { into }), ...(dissolve ? { dissolve: true } : {}) } }),
+  /** Remove a part drawn with Select part: it goes back into the group its pixels came from. */
+  removePart: (id, gid) => request('POST', `/api/jobs/${id}/groups/merge`, { json: { group_ids: [gid], dissolve: true } }),
+  /** Split a group by colour (`mode` 'colour', k-means into `k`) or a part group into its instances ('instances'). */
+  splitGroup: (id, group_id, k = 2, mode = 'colour') => request('POST', `/api/jobs/${id}/groups/split`, { json: { group_id, k, mode } }),
   moveRegions: (id, region_ids, group_id) => request('POST', `/api/jobs/${id}/groups/move`, { json: { region_ids, group_id } }),
   patchGroup: (id, gid, patch) => request('PATCH', `/api/jobs/${id}/groups/${gid}`, { json: patch }),
   regroup: (id, opts) => request('POST', `/api/jobs/${id}/regroup`, { json: opts }),
+  /** SAM 2 prompted by `{points: [[x, y, 1|0]], box, multimask, pick?, crop?}` (work pixels); an
+   *  empty prompt only prepares the image embedding. */
+  segment: (id, prompt, signal = null) => request('POST', `/api/jobs/${id}/segment`, { json: prompt, signal }),
+  /** Commit a prompt (re-run on the server) as a new part group; `prompt.name` names it. */
+  addPart: (id, prompt) => request('POST', `/api/jobs/${id}/groups/from_mask`, { json: prompt }),
+  /** Up to five candidate parts for a phrase, each with its mask and the prompt that commits it. */
+  findParts: (id, text, signal = null) => request('POST', `/api/jobs/${id}/find`, { json: { text }, signal }),
 
   createPalette: (prompt, n_colors) => request('POST', '/api/palettes', { json: { prompt, n_colors } }),
   palette: (pid) => request('GET', `/api/palettes/${pid}`),
@@ -161,6 +176,42 @@ export function createRenderQueue(jobId) {
       } catch (err) {
         if (err?.name === 'AbortError') return null;
         throw err;
+      }
+    },
+    cancel() { controller?.abort(); controller = null; seq++; },
+  };
+}
+
+/**
+ * Select part prompts: only the newest matters. `run` aborts the in-flight prompt, whose promise
+ * then resolves to `null`, and retries once after the server's Retry-After when the GPU is busy.
+ */
+export function createSegmentQueue(jobId) {
+  let controller = null;
+  let seq = 0;
+  return {
+    /** @returns {Promise<object|null>} the answer with `roundTripMs`, or null when superseded. */
+    async run(prompt, { onBusy = null } = {}) {
+      controller?.abort();
+      controller = new AbortController();
+      const mine = ++seq;
+      const signal = controller.signal;
+      const t0 = performance.now();
+      for (let attempt = 0; ; attempt++) {
+        try {
+          const res = await api.segment(jobId, prompt, signal);
+          if (mine !== seq) return null;
+          return { ...res, roundTripMs: performance.now() - t0 };
+        } catch (err) {
+          if (err?.name === 'AbortError' || mine !== seq) return null;
+          if (err instanceof ApiError && err.status === 503 && attempt < 2) {
+            onBusy?.(err);
+            await new Promise((r) => setTimeout(r, Math.max(0.5, err.retryAfter || 1) * 1000));
+            if (mine !== seq) return null;
+            continue;
+          }
+          throw err;
+        }
       }
     },
     cancel() { controller?.abort(); controller = null; seq++; },
